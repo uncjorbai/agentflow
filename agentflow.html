@@ -125,6 +125,7 @@
         <button data-act="new">New workflow</button>
         <button data-act="open">Open .json…</button>
         <button data-act="importmd">Open .md…</button>
+        <button data-act="openmmd">Open .mmd…</button>
       </div>
     </div>
     <div class="menu" id="exportMenu">
@@ -132,9 +133,13 @@
       <div class="menu-list">
         <button data-act="exportjson">Export .json…</button>
         <button data-act="exportmd">Export .md…</button>
+        <button data-act="exportmmd">Export .mmd…</button>
         <div class="menu-sep"></div>
         <button data-act="copyclaude">Copy for Claude (Markdown)</button>
         <button data-act="copyagent">Copy Agent Prompt</button>
+        <div class="menu-sep"></div>
+        <button data-act="copypacket">Copy node packet</button>
+        <button data-act="allpackets">Export all packets…</button>
       </div>
     </div>
     <button class="btn" id="libBtn">Library</button>
@@ -163,6 +168,7 @@
 </div>
 <input type="file" id="fileInput" accept=".json" style="display:none">
 <input type="file" id="mdInput" accept=".md,.markdown,.txt" style="display:none">
+<input type="file" id="mmdInput" accept=".mmd,.mermaid,.md,.txt" style="display:none">
 <div id="valModal"><div id="modalBox">
   <div id="modalHead"><h3>Validation</h3><div style="flex:1"></div>
     <button class="btn" id="valClose">Close</button></div>
@@ -399,11 +405,14 @@ function renderProps(){
       : `<input type="text" data-k="${key}" value="${val}" placeholder="${esc(hint)}">`;
     if(hint && kind!=="area") html+=`<div class="field-hint">${esc(hint)}</div>`;
   });
+  html+=`<button class="btn" id="pktBtn" style="margin-top:16px;width:100%">Copy context packet</button>`;
+  html+=`<div class="field-hint">A focused, standalone brief for this node — objective + this step + its upstream/downstream interfaces.</div>`;
   html+=`<button class="btn" id="delNode">Delete node</button>`;
   props.innerHTML=html;
   props.querySelectorAll("[data-k]").forEach(inp=>{
     inp.addEventListener("input",ev=>{ n.data[ev.target.dataset.k]=ev.target.value; if(ev.target.dataset.k==="title"||["objective","instructions","criteria","content","deliverable","review"].includes(ev.target.dataset.k)) render(); autosave(); });
   });
+  document.getElementById("pktBtn").addEventListener("click",()=>{ const md=nodePacket(n.id,{frame:true}); copyText(md,"Node packet copied"); showModal("Context packet — "+pTitle(n),md,"packet.md"); });
   document.getElementById("delNode").addEventListener("click",()=>deleteNode(n.id));
 }
 function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
@@ -599,6 +608,82 @@ function orderedNodes(){
   state.nodes.forEach(n=>{ if(!seen.has(n.id)){seen.add(n.id);out.push(n);} });
   return out;
 }
+function stepNumbers(){ const num={}; let i=0; orderedNodes().forEach(n=>{ if(n.type!=="start"&&n.type!=="context") num[n.id]=++i; }); return num; }
+function pTitle(n){ return (n.data&&n.data.title&&n.data.title.trim())?n.data.title.trim():defaultTitle(n.type); }
+
+/* Graph-local context packet: the focused brief for a single node. */
+function nodePacket(id, opts){
+  opts=opts||{}; const frame=opts.frame!==false;
+  const n=getNode(id); if(!n) return "";
+  const num=stepNumbers();
+  const inc=state.edges.filter(e=>e.to===id);
+  const out=state.edges.filter(e=>e.from===id);
+  const d=n.data||{};
+  let md=`# Task packet — ${pTitle(n)}${num[id]?` (step ${num[id]})`:""}\n\n`;
+
+  if(frame){
+    const s=state.nodes.find(x=>x.type==="start");
+    if(s){
+      if(s.data.objective) md+=`## Objective (context)\n${s.data.objective}\n\n`;
+      if(s.data.context) md+=`## Background\n${s.data.context}\n\n`;
+      if(s.data.constraints) md+=`## Guardrails\n${s.data.constraints}\n\n`;
+    }
+  }
+
+  md+=`## Your step\n`;
+  if(n.type==="decision"){
+    if(d.criteria) md+=`- Decide: ${d.criteria}\n`;
+    if(out.length){ md+=`- Branches:\n`; out.forEach(e=>{ const t=getNode(e.to); md+=`    - **${e.label||"→"}** → ${t?pTitle(t):"?"}${num[e.to]?` (step ${num[e.to]})`:""}\n`; }); }
+  } else if(n.type==="gate"){
+    md+=`- This is a HUMAN approval gate — pause for sign-off before continuing.\n`;
+    if(d.review) md+=`- Review: ${d.review}\n`;
+    if(d.criteria) md+=`- Approve when: ${d.criteria}\n`;
+  } else if(n.type==="end"){
+    if(d.deliverable) md+=`- Deliverable: ${d.deliverable}\n`;
+    if(d.success) md+=`- Success when: ${d.success}\n`;
+  } else if(n.type==="context"){
+    if(d.content) md+=`- Reference: ${d.content}\n`;
+  } else {
+    if(n.type==="subagent") md+=`- Delegate to: ${d.agent||"a subagent"}\n`;
+    if(d.goal) md+=`- Intent: ${d.goal}\n`;
+    if(d.instructions) md+=`- Do: ${d.instructions}\n`;
+    if(d.references) md+=`- References: ${d.references}\n`;
+    if(d.acceptance) md+=`- Done when: ${d.acceptance}\n`;
+  }
+  md+=`\n`;
+
+  if(inc.length || d.inputs){
+    md+=`## You receive (upstream)\n`;
+    if(d.inputs) md+=`- Inputs: ${d.inputs}\n`;
+    inc.forEach(e=>{ const p=getNode(e.from); if(!p)return; md+=`- ← from **${pTitle(p)}**${num[p.id]?` (step ${num[p.id]})`:""}${e.label?` [${e.label}]`:""}${(p.data&&p.data.outputs)?` — provides: ${p.data.outputs}`:""}\n`; });
+    md+=`\n`;
+  }
+  if(out.length || d.outputs){
+    md+=`## You must produce (downstream)\n`;
+    if(d.outputs) md+=`- Output: ${d.outputs}\n`;
+    out.forEach(e=>{ const c=getNode(e.to); if(!c)return; md+=`- → consumed by **${pTitle(c)}**${num[c.id]?` (step ${num[c.id]})`:""}${e.label?` [${e.label}]`:""}${(c.data&&c.data.inputs)?` — needs: ${c.data.inputs}`:""}\n`; });
+    md+=`\n`;
+  }
+  return md.trim()+"\n";
+}
+function allPackets(){
+  const nodes=orderedNodes().filter(n=>n.type!=="start"&&n.type!=="context");
+  const num=stepNumbers();
+  const s=state.nodes.find(x=>x.type==="start");
+  let md=`# Context packets — ${state.name}\n\n> One focused brief per node, in execution order. Hand each packet to the agent working that step; the shared frame below applies to all.\n\n`;
+  if(s){
+    md+=`## Shared frame (applies to every packet)\n`;
+    if(s.data.objective) md+=`- **Objective:** ${s.data.objective}\n`;
+    if(s.data.context) md+=`- **Background:** ${s.data.context}\n`;
+    if(s.data.constraints) md+=`- **Guardrails:** ${s.data.constraints}\n`;
+    md+=`\n`;
+  }
+  md+=`## Order of work\n`;
+  nodes.forEach(n=>{ md+=`${num[n.id]}. ${pTitle(n)}\n`; });
+  md+=`\n---\n\n`;
+  nodes.forEach(n=>{ md+=nodePacket(n.id,{frame:false})+`\n---\n\n`; });
+  return md.trim()+"\n";
+}
 function toMarkdown(){
   const nodes=orderedNodes();
   const num={}; let i=0;
@@ -730,6 +815,10 @@ const ACTIONS = {
   "exportmd":  ()=> showModal("Markdown export",toMarkdown(),slug()+".md"),
   "copyclaude":()=> copyText(toMarkdown(),"Markdown copied — paste into Claude"),
   "copyagent": ()=>{ copyText(AGENT_PROMPT,"Agent prompt copied"); showModal("Agent prompt — paste into any Claude session, then attach your sketch",AGENT_PROMPT,"agentflow-agent-prompt.txt"); },
+  "exportmmd": ()=> showModal("Mermaid export — paste inside a ```mermaid block to render on GitHub",toMermaid(),slug()+".mmd"),
+  "openmmd":  ()=> document.getElementById("mmdInput").click(),
+  "copypacket":()=>{ if(!sel||sel.kind!=="node"){ toast("Select a node first, then Copy node packet"); return; } const md=nodePacket(sel.id,{frame:true}); copyText(md,"Node packet copied"); showModal("Context packet — "+pTitle(getNode(sel.id)),md,"packet.md"); },
+  "allpackets":()=> showModal("All context packets — one focused brief per node",allPackets(),slug()+"-packets.md"),
 };
 document.querySelectorAll(".menu").forEach(menu=>{
   const btn=menu.querySelector(".menu-btn");
@@ -911,6 +1000,97 @@ document.getElementById("libBtn").onclick=openLib;
 document.getElementById("libClose").onclick=closeLib;
 document.getElementById("saveBlockBtn").onclick=saveSelectionAsBlock;
 document.getElementById("libModal").addEventListener("mousedown",e=>{ if(e.target.id==="libModal")closeLib(); });
+
+/* ---------- Mermaid export (read-only projection) & import (structure on-ramp) ---------- */
+function mmId(id){ return String(id).replace(/[^A-Za-z0-9_]/g,"_"); }
+function mmLabel(s){ return String(s||"").replace(/"/g,"'").replace(/\s+/g," ").trim(); }
+function mmShape(n){
+  const L='"'+mmLabel(n.data&&n.data.title?n.data.title:defaultTitle(n.type))+'"';
+  switch(n.type){
+    case "start":    return `([${L}])`;   // stadium
+    case "end":      return `((${L}))`;   // circle
+    case "subagent": return `[[${L}]]`;   // subroutine
+    case "decision": return `{${L}}`;     // rhombus
+    case "gate":     return `{{${L}}}`;   // hexagon
+    case "context":  return `>${L}]`;     // note/flag
+    default:         return `[${L}]`;     // rectangle (step)
+  }
+}
+function toMermaid(){
+  let out="flowchart LR\n";
+  state.nodes.forEach(n=>{ out+=`  ${mmId(n.id)}${mmShape(n)}\n`; });
+  if(state.edges.length) out+="\n";
+  state.edges.forEach(e=>{
+    const lb=(e.label||"").trim().replace(/\|/g,"/");
+    out += lb ? `  ${mmId(e.from)} -->|${lb}| ${mmId(e.to)}\n` : `  ${mmId(e.from)} --> ${mmId(e.to)}\n`;
+  });
+  return out;
+}
+function mmType(wrap){
+  if(/^\(\[[\s\S]*\]\)$/.test(wrap)) return "start";
+  if(/^\(\([\s\S]*\)\)$/.test(wrap)) return "end";
+  if(/^\[\[[\s\S]*\]\]$/.test(wrap)) return "subagent";
+  if(/^\{\{[\s\S]*\}\}$/.test(wrap)) return "gate";
+  if(/^\[\/[\s\S]*\/\]$/.test(wrap)) return "gate";
+  if(/^\{[\s\S]*\}$/.test(wrap))     return "decision";
+  if(/^>[\s\S]*\]$/.test(wrap))      return "context";
+  return "step"; // [..] (..) rounded, cylinders, etc.
+}
+function mmStrip(wrap){
+  let inner=wrap.replace(/^[\(\[\{>\/\\]+/,"").replace(/[\)\]\}\/\\]+$/,"").trim();
+  return inner.replace(/^["']|["']$/g,"").replace(/<br\s*\/?>/gi," ").trim();
+}
+function fromMermaid(text){
+  // If a fenced ```mermaid block exists (e.g. pasted from Markdown), use its contents.
+  const fence=text.match(/```+\s*mermaid\s*([\s\S]*?)```/i);
+  if(fence) text=fence[1];
+  const nodes={}, edges=[];
+  const ensure=(id,type,title)=>{
+    if(!nodes[id]) nodes[id]={type:type||"step",title:title||id};
+    else { if(type&&nodes[id].type==="step")nodes[id].type=type; if(title&&(nodes[id].title===id||!nodes[id].title))nodes[id].title=title; }
+  };
+  const nodeDefRe=/([A-Za-z0-9_]+)(\(\[[^\]]*\]\)|\(\([^)]*\)\)|\[\[[^\]]*\]\]|\{\{[^}]*\}\}|\[\/[^\]]*\/\]|>[^\]]*\]|\[[^\]]*\]|\{[^}]*\}|\([^)]*\))/;
+  const edgeRe=/([A-Za-z0-9_]+)\s*[-.=o<]+>\s*(?:\|([^|]*)\|)?\s*([A-Za-z0-9_]+)/g;
+  text.split(/\r?\n/).forEach(raw=>{
+    let line=raw.trim();
+    if(!line) return;
+    if(/^(flowchart|graph)\b/i.test(line)) return;
+    if(/^(subgraph|end\b|classDef|class\s|style\s|linkStyle|click\s|direction\s|%%)/i.test(line)) return;
+    // convert "A -- label --> B" dash-labels into pipe form
+    line=line.replace(/([-.=])\1*\s+([^->|=.][^>|]*?)\s+([-.=])\3*>/g,"-->|$2|");
+    // pull out node definitions, leaving bare ids behind
+    let m,guard=0;
+    while((m=nodeDefRe.exec(line))&&guard++<60){
+      ensure(m[1],mmType(m[2]),mmStrip(m[2]));
+      line=line.slice(0,m.index)+" "+m[1]+" "+line.slice(m.index+m[0].length);
+      nodeDefRe.lastIndex=0;
+    }
+    // parse edges (supports chains A --> B --> C by re-seeding from 'to')
+    let e; edgeRe.lastIndex=0;
+    while((e=edgeRe.exec(line))){
+      ensure(e[1]); ensure(e[3]);
+      edges.push({from:e[1],to:e[3],label:(e[2]||"").trim()});
+      edgeRe.lastIndex=e.index+e[0].length-e[3].length;
+    }
+  });
+  const ids=Object.keys(nodes);
+  const outNodes=ids.map(id=>({id,type:TYPES[nodes[id].type]?nodes[id].type:"step",data:{title:nodes[id].title}}));
+  const outEdges=edges.map(e=>({from:e.from,to:e.to,label:e.label||""}));
+  return {name:"Imported from Mermaid",nodes:outNodes,edges:outEdges};
+}
+document.getElementById("mmdInput").onchange=e=>{
+  const f=e.target.files[0]; if(!f)return; const r=new FileReader();
+  r.onload=()=>{
+    try{
+      const parsed=fromMermaid(r.result);
+      if(!parsed.nodes.length){ toast("No nodes found in that Mermaid"); return; }
+      if(state.nodes.length && !confirm("Import structure from Mermaid?\n\nNodes come in with titles and types only — context fields (intent, inputs, acceptance, …) will be blank for you to fill in. This replaces the current canvas.")) return;
+      loadData(parsed);
+      toast(`Imported ${parsed.nodes.length} nodes — now fill in each node's context`);
+    }catch(err){ console.error(err); toast("Couldn't parse that Mermaid"); }
+  };
+  r.readAsText(f); e.target.value="";
+};
 
 /* ---------- Import Markdown (round-trip of AgentFlow export) ---------- */
 document.getElementById("mdInput").onchange=e=>{
