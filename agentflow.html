@@ -1,0 +1,884 @@
+<!DOCTYPE html>
+<!--
+  AgentFlow — visual context builder for Claude. Single self-contained file.
+  ── FOR AGENTS ────────────────────────────────────────────────────────────────
+  To author or edit a workflow programmatically, DO NOT hand-edit this HTML.
+  Produce a JSON file the app ingests via the "Open .json" button. Coordinates
+  are OPTIONAL — omit x/y and the app auto-lays-out the graph. Minimal schema:
+    { "name": "My workflow",
+      "nodes": [ { "id": "a", "type": "start|step|subagent|decision|gate|context|end",
+                   "data": { "title": "...", ...type-specific fields... } } ],
+      "edges": [ { "from": "a", "to": "b", "label": "" } ] }
+  Full contract, per-type fields, and paper-sketch→JSON examples: see AGENTS.md
+  in this folder. The Markdown that "Export Markdown" produces also round-trips
+  back via "Import .md".
+  ───────────────────────────────────────────────────────────────────────────────
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AgentFlow — Visual Context Builder for Claude</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --border:#2a2f3a;
+    --text:#e6e9ef; --muted:#8b93a4; --accent:#6ea8fe;
+    --start:#3fb950; --step:#58a6ff; --subagent:#bc8cff; --decision:#e3b341;
+    --gate:#f85149; --context:#8b949e; --end:#39c5cf;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--text);overflow:hidden}
+  #app{display:flex;flex-direction:column;height:100vh}
+  header{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--border);flex:0 0 auto}
+  header h1{font-size:15px;margin:0 12px 0 0;font-weight:600;letter-spacing:.3px}
+  header h1 span{color:var(--accent)}
+  .btn{background:var(--panel2);color:var(--text);border:1px solid var(--border);padding:6px 10px;border-radius:6px;font-size:12px;cursor:pointer}
+  .btn:hover{border-color:var(--accent)}
+  .btn.primary{background:var(--accent);color:#0b1220;border-color:var(--accent);font-weight:600}
+  .spacer{flex:1}
+  .hint{font-size:11px;color:var(--muted)}
+  .menu{position:relative}
+  .menu-btn{display:inline-flex;align-items:center;gap:5px}
+  .menu-list{position:absolute;top:calc(100% + 4px);left:0;min-width:220px;background:var(--panel2);border:1px solid var(--border);border-radius:8px;padding:5px;display:none;z-index:40;box-shadow:0 10px 28px rgba(0,0,0,.45)}
+  .menu.open .menu-list{display:block}
+  .menu-list button{display:block;width:100%;text-align:left;background:none;border:none;color:var(--text);font-size:12.5px;padding:8px 10px;border-radius:6px;cursor:pointer;white-space:nowrap}
+  .menu-list button:hover{background:var(--panel)}
+  .menu-sep{height:1px;background:var(--border);margin:5px 6px}
+  main{display:flex;flex:1;min-height:0}
+  /* palette */
+  #palette{flex:0 0 168px;background:var(--panel);border-right:1px solid var(--border);padding:10px;overflow:auto}
+  #palette h2{font-size:11px;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin:4px 0 8px}
+  .pal-item{display:flex;align-items:center;gap:8px;padding:8px;margin-bottom:6px;background:var(--panel2);border:1px solid var(--border);border-left-width:3px;border-radius:6px;cursor:grab;font-size:13px;user-select:none}
+  .pal-item:active{cursor:grabbing}
+  .swatch{width:10px;height:10px;border-radius:2px;flex:0 0 auto}
+  .pal-desc{font-size:10px;color:var(--muted);margin:-2px 0 12px 2px;line-height:1.3}
+  /* canvas */
+  #canvasWrap{flex:1;position:relative;min-width:0}
+  svg#canvas{width:100%;height:100%;display:block;background:
+    radial-gradient(circle, #20242d 1px, transparent 1px) 0 0 / 22px 22px, var(--bg);cursor:default}
+  .node-shape{stroke-width:2}
+  .node-title{font-size:12px;font-weight:600;fill:var(--text);pointer-events:none}
+  .node-type{font-size:9px;text-transform:uppercase;letter-spacing:.5px;pointer-events:none}
+  .node-snippet{font-size:10px;fill:var(--muted);pointer-events:none}
+  .node.selected .node-shape{stroke:#fff}
+  .node.multi .node-shape{stroke:#fff;stroke-dasharray:5 4}
+  .port{fill:#0f1115;stroke-width:2;cursor:crosshair}
+  .port:hover{fill:var(--accent)}
+  .edge{fill:none;stroke:#5b6472;stroke-width:2;marker-end:url(#arrow)}
+  .edge.selected{stroke:var(--accent);stroke-width:3}
+  .edge-label-bg{fill:var(--panel2);stroke:var(--border)}
+  .edge-label{font-size:10px;fill:var(--text);pointer-events:none}
+  .edge-hit{fill:none;stroke:transparent;stroke-width:14;cursor:pointer}
+  #tempEdge{fill:none;stroke:var(--accent);stroke-width:2;stroke-dasharray:5 4;pointer-events:none}
+  /* properties */
+  #props{flex:0 0 320px;background:var(--panel);border-left:1px solid var(--border);padding:12px;overflow:auto}
+  #props h2{font-size:12px;margin:0 0 10px;color:var(--accent)}
+  #props .empty{color:var(--muted);font-size:12px;line-height:1.5}
+  label{display:block;font-size:11px;color:var(--muted);margin:10px 0 3px;text-transform:uppercase;letter-spacing:.4px}
+  input[type=text],textarea,select{width:100%;background:var(--panel2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:7px;font-size:12px;font-family:inherit;resize:vertical}
+  textarea{min-height:56px;line-height:1.4}
+  input:focus,textarea:focus,select:focus{outline:none;border-color:var(--accent)}
+  .field-hint{font-size:10px;color:var(--muted);margin-top:2px}
+  #delNode{margin-top:16px;width:100%;background:#2a1416;border-color:var(--gate);color:#ff9b95}
+  /* modal */
+  #modal,#libModal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}
+  #modalBox{background:var(--panel);border:1px solid var(--border);border-radius:10px;width:min(760px,92vw);max-height:86vh;display:flex;flex-direction:column}
+  #modalHead{display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border)}
+  #modalHead h3{margin:0;font-size:14px}
+  #modalBody{padding:0;overflow:auto}
+  #modalBody pre{margin:0;padding:16px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;line-height:1.5;white-space:pre-wrap;color:#cdd3de}
+  #libList{padding:14px}
+  .lib-row{display:flex;align-items:center;gap:10px;padding:10px;margin-bottom:8px;background:var(--panel2);border:1px solid var(--border);border-radius:8px}
+  .lib-row .name{font-size:13px;font-weight:600}
+  .lib-row .meta{font-size:11px;color:var(--muted)}
+  .lib-row .tag{font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);border:1px solid var(--border);border-radius:4px;padding:1px 5px}
+  .lib-row .grow{flex:1}
+  .lib-empty{color:var(--muted);font-size:12px;padding:8px}
+  .lib-section{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin:6px 2px 8px}
+  .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--panel2);border:1px solid var(--accent);color:var(--text);padding:9px 16px;border-radius:8px;font-size:13px;z-index:60;opacity:0;transition:opacity .2s}
+  .toast.show{opacity:1}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>Agent<span>Flow</span></h1>
+    <div class="menu" id="fileMenu">
+      <button class="btn menu-btn">File ▾</button>
+      <div class="menu-list">
+        <button data-act="new">New workflow</button>
+        <button data-act="open">Open .json…</button>
+        <button data-act="importmd">Open .md…</button>
+      </div>
+    </div>
+    <div class="menu" id="exportMenu">
+      <button class="btn menu-btn primary">Export ▾</button>
+      <div class="menu-list">
+        <button data-act="exportjson">Export .json…</button>
+        <button data-act="exportmd">Export .md…</button>
+        <div class="menu-sep"></div>
+        <button data-act="copyclaude">Copy for Claude (Markdown)</button>
+        <button data-act="copyagent">Copy Agent Prompt</button>
+      </div>
+    </div>
+    <button class="btn" id="libBtn">Library</button>
+    <div class="spacer"></div>
+    <span class="hint" id="statusHint"></span>
+  </header>
+  <main>
+    <div id="palette"></div>
+    <div id="canvasWrap">
+      <svg id="canvas">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0 0 L10 5 L0 10 z" fill="#5b6472"/>
+          </marker>
+        </defs>
+        <g id="world">
+          <g id="edges"></g>
+          <path id="tempEdge" style="display:none"></path>
+          <g id="nodes"></g>
+        </g>
+      </svg>
+    </div>
+    <div id="props"><div class="empty">Select a node to edit its context, or drag a shape from the left onto the canvas.<br><br><b>Tips</b><br>• Drag a node's right dot onto another node to connect.<br>• Click an arrow to label a branch (e.g. Yes / No).<br>• Delete key removes the selection.<br>• Scroll to zoom, drag empty space to pan.</div></div>
+  </main>
+</div>
+<input type="file" id="fileInput" accept=".json" style="display:none">
+<input type="file" id="mdInput" accept=".md,.markdown,.txt" style="display:none">
+<div id="libModal"><div id="modalBox">
+  <div id="modalHead"><h3>Library</h3><div style="flex:1"></div>
+    <button class="btn" id="saveBlockBtn">Save selection as block</button>
+    <button class="btn" id="libClose">Close</button></div>
+  <div id="modalBody"><div id="libList"></div></div>
+</div></div>
+<div id="modal"><div id="modalBox">
+  <div id="modalHead"><h3 id="modalTitle">Export</h3><div class="spacer" style="flex:1"></div>
+    <button class="btn" id="modalCopy">Copy</button>
+    <button class="btn" id="modalDownload">Download</button>
+    <button class="btn" id="modalClose">Close</button></div>
+  <div id="modalBody"><pre id="modalPre"></pre></div>
+</div></div>
+<div class="toast" id="toast"></div>
+
+<script>
+"use strict";
+/* ---------- Node type definitions ---------- */
+const TYPES = {
+  start:    {label:"Objective", color:"var(--start)",    hex:"#3fb950", shape:"rounded", desc:"The workflow's goal + global context & standards. The starting anchor."},
+  step:     {label:"Step",      color:"var(--step)",     hex:"#58a6ff", shape:"rect",    desc:"A unit of work Claude performs."},
+  subagent: {label:"Subagent",  color:"var(--subagent)", hex:"#bc8cff", shape:"rect",    desc:"Delegate specialized work to an agent."},
+  decision: {label:"Decision",  color:"var(--decision)", hex:"#e3b341", shape:"diamond", desc:"Branch. Label the outgoing arrows (Yes/No)."},
+  gate:     {label:"Gate",      color:"var(--gate)",     hex:"#f85149", shape:"rounded", desc:"Human approval checkpoint. Pause here."},
+  context:  {label:"Context",   color:"var(--context)",  hex:"#8b949e", shape:"note",    desc:"Reference material: files, standards, links."},
+  end:      {label:"Deliverable",color:"var(--end)",     hex:"#39c5cf", shape:"rounded", desc:"Final output + success criteria."},
+};
+// Field schema per type: [key, label, kind('text'|'area'), hint]
+const FIELDS = {
+  start: [
+    ["title","Name","text",""],
+    ["objective","Objective","area","What is the overall goal of this workflow?"],
+    ["context","Global context","area","Background Claude needs across all steps."],
+    ["constraints","Constraints / guardrails","area","What must always/never happen. Tech, style, scope limits."],
+  ],
+  step: [
+    ["title","Title","text",""],
+    ["goal","Intent (why)","area","Why this step exists — so Claude can adapt if reality differs."],
+    ["instructions","Instructions (what to do)","area",""],
+    ["inputs","Inputs","area","Artifacts/files this step consumes."],
+    ["outputs","Outputs","area","Artifacts this step produces (feeds later steps)."],
+    ["references","References","area","File paths, docs, links."],
+    ["acceptance","Done when…","area","Verifiable acceptance criteria Claude can self-check."],
+  ],
+  subagent: [
+    ["title","Title","text",""],
+    ["agent","Agent type","text","e.g. Explore, general-purpose, a custom subagent."],
+    ["goal","Intent (why)","area",""],
+    ["instructions","Task for the agent","area",""],
+    ["inputs","Inputs","area",""],
+    ["outputs","Outputs / report back","area","What the agent should return."],
+    ["acceptance","Done when…","area",""],
+  ],
+  decision: [
+    ["title","Question","text","e.g. Design approved?"],
+    ["criteria","How to decide","area","What Claude checks to pick a branch. Label the arrows Yes/No."],
+  ],
+  gate: [
+    ["title","Checkpoint","text","e.g. Human review before build"],
+    ["review","What to review","area","What the human should look at."],
+    ["criteria","Approval criteria","area","What 'approved' means."],
+  ],
+  context: [
+    ["title","Label","text",""],
+    ["content","Content","area","Files, standards, links, constraints to keep in mind."],
+  ],
+  end: [
+    ["title","Name","text",""],
+    ["deliverable","Deliverable","area","The final artifact(s) produced."],
+    ["success","Success criteria","area","How we know the whole workflow succeeded."],
+  ],
+};
+const NODE_W=190, NODE_H=84;
+
+/* ---------- State ---------- */
+let state = {name:"Untitled Workflow", nodes:[], edges:[]};
+let view = {x:60,y:60,s:1};
+let sel = null;          // {kind:'node'|'edge', id}
+let uid = 1;
+function nid(){ return "n"+(uid++); }
+
+const svg = document.getElementById("canvas");
+const world = document.getElementById("world");
+const gNodes = document.getElementById("nodes");
+const gEdges = document.getElementById("edges");
+const tempEdge = document.getElementById("tempEdge");
+
+/* ---------- Palette ---------- */
+const palette = document.getElementById("palette");
+palette.innerHTML = "<h2>Shapes</h2>";
+Object.entries(TYPES).forEach(([t,def])=>{
+  const item=document.createElement("div");
+  item.className="pal-item"; item.draggable=true; item.dataset.type=t;
+  item.style.borderLeftColor=def.hex;
+  item.innerHTML=`<span class="swatch" style="background:${def.hex}"></span>${def.label}`;
+  item.addEventListener("dragstart",e=>{e.dataTransfer.setData("type",t);});
+  const d=document.createElement("div"); d.className="pal-desc"; d.textContent=def.desc;
+  palette.appendChild(item); palette.appendChild(d);
+});
+
+/* ---------- Coordinate helpers ---------- */
+function screenToWorld(sx,sy){
+  const r=svg.getBoundingClientRect();
+  return { x:(sx-r.left-view.x)/view.s, y:(sy-r.top-view.y)/view.s };
+}
+function applyView(){ world.setAttribute("transform",`translate(${view.x},${view.y}) scale(${view.s})`); }
+
+/* ---------- Drop from palette ---------- */
+svg.addEventListener("dragover",e=>e.preventDefault());
+svg.addEventListener("drop",e=>{
+  e.preventDefault();
+  const t=e.dataTransfer.getData("type"); if(!TYPES[t])return;
+  const p=screenToWorld(e.clientX,e.clientY);
+  addNode(t,p.x-NODE_W/2,p.y-NODE_H/2);
+});
+function addNode(type,x,y){
+  const n={id:nid(),type,x:Math.round(x),y:Math.round(y),data:{}};
+  FIELDS[type].forEach(f=>n.data[f[0]]="");
+  n.data.title = defaultTitle(type);
+  state.nodes.push(n); render(); select({kind:"node",id:n.id}); autosave();
+}
+function defaultTitle(type){
+  const m={start:"Objective",step:"New step",subagent:"Delegate task",decision:"Decision?",gate:"Approval gate",context:"Reference",end:"Deliverable"};
+  return m[type]||TYPES[type].label;
+}
+
+/* ---------- Rendering ---------- */
+function nodeCenterRight(n){ return {x:n.x+NODE_W, y:n.y+NODE_H/2}; }
+function nodeCenterLeft(n){ return {x:n.x, y:n.y+NODE_H/2}; }
+function getNode(id){ return state.nodes.find(n=>n.id===id); }
+
+function edgePath(a,b){
+  const dx=Math.max(40,Math.abs(b.x-a.x)*0.5);
+  return `M ${a.x} ${a.y} C ${a.x+dx} ${a.y}, ${b.x-dx} ${b.y}, ${b.x} ${b.y}`;
+}
+function render(){
+  applyView();
+  // edges
+  gEdges.innerHTML="";
+  state.edges.forEach(e=>{
+    const s=getNode(e.from), t=getNode(e.to); if(!s||!t)return;
+    const a=nodeCenterRight(s), b=nodeCenterLeft(t);
+    const d=edgePath(a,b);
+    const grp=mk("g");
+    const hit=mk("path",{class:"edge-hit",d});
+    const path=mk("path",{class:"edge"+(sel&&sel.kind==="edge"&&sel.id===e.id?" selected":""),d,id:"edge-"+e.id});
+    grp.appendChild(hit); grp.appendChild(path);
+    hit.addEventListener("mousedown",ev=>{ev.stopPropagation();select({kind:"edge",id:e.id});});
+    if(e.label){
+      const mx=(a.x+b.x)/2, my=(a.y+b.y)/2;
+      const w=e.label.length*6+12;
+      grp.appendChild(mk("rect",{class:"edge-label-bg",x:mx-w/2,y:my-9,width:w,height:18,rx:4}));
+      const tx=mk("text",{class:"edge-label",x:mx,y:my+3,"text-anchor":"middle"}); tx.textContent=e.label;
+      grp.appendChild(tx);
+    }
+    gEdges.appendChild(grp);
+  });
+  // nodes
+  gNodes.innerHTML="";
+  state.nodes.forEach(n=>{
+    const def=TYPES[n.type];
+    const g=mk("g",{class:"node"+(sel&&sel.kind==="node"&&sel.id===n.id?" selected":"")+(multi.has(n.id)?" multi":""),transform:`translate(${n.x},${n.y})`,id:"node-"+n.id});
+    // shape
+    let shape;
+    if(def.shape==="diamond"){
+      shape=mk("polygon",{class:"node-shape",points:`${NODE_W/2},0 ${NODE_W},${NODE_H/2} ${NODE_W/2},${NODE_H} 0,${NODE_H/2}`,fill:"#1b1f27",stroke:def.hex});
+    } else if(def.shape==="note"){
+      const f=18;
+      shape=mk("path",{class:"node-shape",d:`M0 0 H${NODE_W} V${NODE_H-f} L${NODE_W-f} ${NODE_H} H0 Z`,fill:"#1b1f27",stroke:def.hex});
+    } else {
+      const rx=def.shape==="rounded"?18:6;
+      shape=mk("rect",{class:"node-shape",width:NODE_W,height:NODE_H,rx,fill:"#1b1f27",stroke:def.hex});
+    }
+    g.appendChild(shape);
+    // accent bar
+    g.appendChild(mk("rect",{x:0,y:0,width:5,height:NODE_H,rx:2,fill:def.hex,opacity:.9,style:"pointer-events:none"}));
+    // type label
+    const ty=mk("text",{class:"node-type",x:14,y:18,fill:def.hex}); ty.textContent=def.label.toUpperCase(); g.appendChild(ty);
+    // title
+    const title=mk("text",{class:"node-title",x:14,y:38}); title.textContent=trunc(n.data.title||defaultTitle(n.type),26); g.appendChild(title);
+    // snippet
+    const snipKey = n.type==="context"?"content":(n.type==="start"?"objective":(n.type==="decision"?"criteria":(n.type==="end"?"deliverable":(n.type==="gate"?"review":"instructions"))));
+    const snip=(n.data[snipKey]||"").replace(/\n/g," ");
+    if(snip){ const st=mk("text",{class:"node-snippet",x:14,y:56}); st.textContent=trunc(snip,30); g.appendChild(st); }
+    // ports
+    if(n.type!=="end"){
+      const op=mk("circle",{class:"port out",cx:NODE_W,cy:NODE_H/2,r:6,stroke:def.hex}); g.appendChild(op);
+      op.addEventListener("mousedown",ev=>startConnect(ev,n));
+    }
+    if(n.type!=="start"){
+      g.appendChild(mk("circle",{class:"port in",cx:0,cy:NODE_H/2,r:5,stroke:"#5b6472"}));
+    }
+    g.addEventListener("mousedown",ev=>startNodeDrag(ev,n));
+    gNodes.appendChild(g);
+  });
+  updateStatus();
+}
+function mk(tag,attrs){
+  const el=document.createElementNS("http://www.w3.org/2000/svg",tag);
+  if(attrs)for(const k in attrs)el.setAttribute(k,attrs[k]);
+  return el;
+}
+function trunc(s,n){ s=s||""; return s.length>n?s.slice(0,n-1)+"…":s; }
+
+/* ---------- Selection & properties ---------- */
+function select(s){ sel=s; render(); renderProps(); }
+function renderProps(){
+  const props=document.getElementById("props");
+  if(!sel){ props.innerHTML='<div class="empty">Select a node to edit its context, or drag a shape from the left.</div>'; return; }
+  if(sel.kind==="edge"){
+    const e=state.edges.find(x=>x.id===sel.id);
+    props.innerHTML=`<h2>Connection</h2>
+      <label>Branch label</label>
+      <input type="text" id="edgeLabel" value="${esc(e.label||"")}" placeholder="e.g. Yes / No / on failure">
+      <div class="field-hint">Shown on the arrow; used to describe the branch in the export.</div>
+      <button class="btn" id="delEdge" style="margin-top:16px;width:100%">Delete connection</button>`;
+    document.getElementById("edgeLabel").addEventListener("input",ev=>{e.label=ev.target.value;render();autosave();});
+    document.getElementById("delEdge").addEventListener("click",()=>{state.edges=state.edges.filter(x=>x.id!==e.id);sel=null;render();renderProps();autosave();});
+    return;
+  }
+  const n=getNode(sel.id); if(!n){props.innerHTML="";return;}
+  const def=TYPES[n.type];
+  let html=`<h2 style="color:${def.hex}">${def.label}</h2>`;
+  FIELDS[n.type].forEach(([key,label,kind,hint])=>{
+    const val=esc(n.data[key]||"");
+    html+=`<label>${label}</label>`;
+    html+= kind==="area"
+      ? `<textarea data-k="${key}" placeholder="${esc(hint)}">${val}</textarea>`
+      : `<input type="text" data-k="${key}" value="${val}" placeholder="${esc(hint)}">`;
+    if(hint && kind!=="area") html+=`<div class="field-hint">${esc(hint)}</div>`;
+  });
+  html+=`<button class="btn" id="delNode">Delete node</button>`;
+  props.innerHTML=html;
+  props.querySelectorAll("[data-k]").forEach(inp=>{
+    inp.addEventListener("input",ev=>{ n.data[ev.target.dataset.k]=ev.target.value; if(ev.target.dataset.k==="title"||["objective","instructions","criteria","content","deliverable","review"].includes(ev.target.dataset.k)) render(); autosave(); });
+  });
+  document.getElementById("delNode").addEventListener("click",()=>deleteNode(n.id));
+}
+function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+function deleteNode(id){
+  state.nodes=state.nodes.filter(n=>n.id!==id);
+  state.edges=state.edges.filter(e=>e.from!==id&&e.to!==id);
+  sel=null; render(); renderProps(); autosave();
+}
+
+/* ---------- Dragging nodes ---------- */
+let drag=null;
+const multi=new Set();   // node ids in multi-selection
+function startNodeDrag(ev,n){
+  if(ev.target.classList.contains("port"))return;
+  ev.stopPropagation();
+  if(ev.shiftKey){ if(multi.has(n.id))multi.delete(n.id); else multi.add(n.id); select({kind:"node",id:n.id}); return; }
+  if(!multi.has(n.id)) multi.clear();
+  select({kind:"node",id:n.id});
+  const start=screenToWorld(ev.clientX,ev.clientY);
+  const group = multi.size>1 ? state.nodes.filter(x=>multi.has(x.id)) : [n];
+  drag={ids:group.map(g=>g.id),off:{},moved:false};
+  group.forEach(g=>drag.off[g.id]={x:g.x-start.x,y:g.y-start.y});
+  window.addEventListener("mousemove",onNodeDragMove);
+  window.addEventListener("mouseup",onNodeDragUp);
+}
+function onNodeDragMove(ev){
+  const p=screenToWorld(ev.clientX,ev.clientY);
+  drag.ids.forEach(id=>{ const n=getNode(id); if(!n)return; n.x=Math.round(p.x+drag.off[id].x); n.y=Math.round(p.y+drag.off[id].y); });
+  drag.moved=true; render();
+}
+function onNodeDragUp(){ window.removeEventListener("mousemove",onNodeDragMove); window.removeEventListener("mouseup",onNodeDragUp); if(drag&&drag.moved)autosave(); drag=null; }
+
+/* ---------- Connecting ---------- */
+let conn=null;
+function startConnect(ev,n){
+  ev.stopPropagation();
+  const from=nodeCenterRight(n);
+  conn={from:n.id,start:from};
+  tempEdge.style.display="";
+  window.addEventListener("mousemove",onConnMove);
+  window.addEventListener("mouseup",onConnUp);
+}
+function onConnMove(ev){
+  const p=screenToWorld(ev.clientX,ev.clientY);
+  tempEdge.setAttribute("d",edgePath(conn.start,p));
+}
+function onConnUp(ev){
+  window.removeEventListener("mousemove",onConnMove);
+  window.removeEventListener("mouseup",onConnUp);
+  tempEdge.style.display="none";
+  const p=screenToWorld(ev.clientX,ev.clientY);
+  const target=state.nodes.find(n=>n.id!==conn.from && p.x>=n.x&&p.x<=n.x+NODE_W&&p.y>=n.y&&p.y<=n.y+NODE_H);
+  if(target && target.type!=="start"){
+    if(!state.edges.some(e=>e.from===conn.from&&e.to===target.id)){
+      const from=getNode(conn.from);
+      const label = from.type==="decision" ? (state.edges.filter(e=>e.from===from.id).length===0?"Yes":"No") : "";
+      state.edges.push({id:"e"+(uid++),from:conn.from,to:target.id,label});
+      autosave();
+    }
+  }
+  conn=null; render();
+}
+
+/* ---------- Pan & zoom ---------- */
+let pan=null;
+svg.addEventListener("mousedown",ev=>{
+  if(ev.target===svg||ev.target===world||ev.target.tagName==="rect"&&ev.target.parentNode===svg){}
+  if(ev.target.closest(".node")||ev.target.closest(".edge-hit"))return;
+  multi.clear(); select(null);
+  pan={x:ev.clientX,y:ev.clientY,vx:view.x,vy:view.y};
+  window.addEventListener("mousemove",onPan);
+  window.addEventListener("mouseup",()=>{pan=null;window.removeEventListener("mousemove",onPan);},{once:true});
+});
+function onPan(ev){ if(!pan)return; view.x=pan.vx+(ev.clientX-pan.x); view.y=pan.vy+(ev.clientY-pan.y); applyView(); }
+svg.addEventListener("wheel",ev=>{
+  ev.preventDefault();
+  const r=svg.getBoundingClientRect();
+  const mx=ev.clientX-r.left, my=ev.clientY-r.top;
+  const wx=(mx-view.x)/view.s, wy=(my-view.y)/view.s;
+  const f=ev.deltaY<0?1.1:1/1.1;
+  view.s=Math.min(2.5,Math.max(0.3,view.s*f));
+  view.x=mx-wx*view.s; view.y=my-wy*view.s;
+  applyView();
+},{passive:false});
+
+/* ---------- Keyboard ---------- */
+window.addEventListener("keydown",ev=>{
+  if(ev.target.matches("input,textarea"))return;
+  if((ev.key==="Delete"||ev.key==="Backspace")&&sel){
+    if(sel.kind==="node")deleteNode(sel.id);
+    else {state.edges=state.edges.filter(e=>e.id!==sel.id);sel=null;render();renderProps();autosave();}
+  }
+});
+
+/* ---------- Status ---------- */
+function updateStatus(){
+  document.getElementById("statusHint").textContent=`${state.name} · ${state.nodes.length} nodes · ${state.edges.length} links`;
+}
+
+/* ---------- Compile to Markdown ---------- */
+function orderedNodes(){
+  // DFS from start(s), fall back to remaining by position
+  const byId={}; state.nodes.forEach(n=>byId[n.id]=n);
+  const out=[], seen=new Set();
+  const outEdges=id=>state.edges.filter(e=>e.from===id);
+  const starts=state.nodes.filter(n=>n.type==="start");
+  const roots = starts.length?starts:state.nodes.filter(n=>!state.edges.some(e=>e.to===n.id));
+  function dfs(id){ if(seen.has(id))return; seen.add(id); const n=byId[id]; if(n)out.push(n); outEdges(id).forEach(e=>dfs(e.to)); }
+  roots.forEach(r=>dfs(r.id));
+  state.nodes.forEach(n=>{ if(!seen.has(n.id)){seen.add(n.id);out.push(n);} });
+  return out;
+}
+function toMarkdown(){
+  const nodes=orderedNodes();
+  const num={}; let i=0;
+  nodes.forEach(n=>{ if(n.type!=="start"&&n.type!=="context") num[n.id]=++i; });
+  const label=n=>n.data.title||defaultTitle(n.type);
+  const ref=id=>{ const n=getNode(id); return n?`**${label(n)}**${num[id]?` (step ${num[id]})`:""}`:"?"; };
+  let md=`# Workflow: ${state.name}\n\n`;
+  md+=`> Visual workflow authored in AgentFlow. Follow the steps in order; honor decisions and gates.\n\n`;
+
+  const starts=nodes.filter(n=>n.type==="start");
+  starts.forEach(s=>{
+    if(s.data.objective) md+=`## Objective\n${s.data.objective}\n\n`;
+    if(s.data.context) md+=`## Global context\n${s.data.context}\n\n`;
+    if(s.data.constraints) md+=`## Constraints & guardrails\n${s.data.constraints}\n\n`;
+  });
+
+  const ctx=nodes.filter(n=>n.type==="context");
+  if(ctx.length){
+    md+=`## Reference material\n`;
+    ctx.forEach(c=>{ md+=`- **${label(c)}**${c.data.content?`: ${c.data.content.replace(/\n/g," ")}`:""}\n`; });
+    md+=`\n`;
+  }
+
+  md+=`## Steps\n\n`;
+  nodes.filter(n=>n.type!=="start"&&n.type!=="context").forEach(n=>{
+    const outs=state.edges.filter(e=>e.from===n.id);
+    if(n.type==="decision"){
+      md+=`### ${num[n.id]}. Decision — ${label(n)}\n`;
+      if(n.data.criteria) md+=`How to decide: ${n.data.criteria}\n`;
+      outs.forEach(e=>{ md+=`- **${e.label||"→"}** → go to ${ref(e.to)}\n`; });
+      md+=`\n`; return;
+    }
+    if(n.type==="gate"){
+      md+=`### ${num[n.id]}. ⛔ Gate — ${label(n)}\n`;
+      md+=`Pause for human approval before continuing.\n`;
+      if(n.data.review) md+=`- Review: ${n.data.review}\n`;
+      if(n.data.criteria) md+=`- Approve when: ${n.data.criteria}\n`;
+      if(outs.length) md+=`- On approval → ${outs.map(e=>ref(e.to)).join(", ")}\n`;
+      md+=`\n`; return;
+    }
+    if(n.type==="end"){
+      md+=`### ${num[n.id]}. ✅ Deliverable — ${label(n)}\n`;
+      if(n.data.deliverable) md+=`${n.data.deliverable}\n`;
+      if(n.data.success) md+=`- Success when: ${n.data.success}\n`;
+      md+=`\n`; return;
+    }
+    // step / subagent
+    const head = n.type==="subagent" ? `${num[n.id]}. ${label(n)} — delegate${n.data.agent?` to \`${n.data.agent}\``:""}` : `${num[n.id]}. ${label(n)}`;
+    md+=`### ${head}\n`;
+    if(n.data.goal) md+=`- **Intent:** ${n.data.goal}\n`;
+    if(n.data.instructions) md+=`- **Do:** ${n.data.instructions}\n`;
+    if(n.data.inputs) md+=`- **Inputs:** ${n.data.inputs}\n`;
+    if(n.data.outputs) md+=`- **Outputs:** ${n.data.outputs}\n`;
+    if(n.data.references) md+=`- **References:** ${n.data.references}\n`;
+    if(n.data.acceptance) md+=`- **Done when:** ${n.data.acceptance}\n`;
+    if(outs.length){ const nexts=outs.map(e=>ref(e.to)+(e.label?` (${e.label})`:"")).join(", "); md+=`- **Next:** ${nexts}\n`; }
+    md+=`\n`;
+  });
+  return md.trim()+"\n";
+}
+
+/* ---------- Save / Load / Export ---------- */
+function serialize(){ return JSON.stringify({name:state.name,nodes:state.nodes,edges:state.edges,view},null,2); }
+function download(filename,text){
+  const b=new Blob([text],{type:"text/plain"});
+  const a=document.createElement("a"); a.href=URL.createObjectURL(b); a.download=filename; a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+const slug=()=>state.name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")||"workflow";
+
+function doCopy(text){
+  return new Promise(resolve=>{
+    const fallback=()=>{ try{ const ta=document.createElement("textarea"); ta.value=text; ta.style.position="fixed"; ta.style.top="-1000px"; document.body.appendChild(ta); ta.focus(); ta.select(); const ok=document.execCommand("copy"); document.body.removeChild(ta); resolve(ok); }catch(e){ resolve(false); } };
+    if(navigator.clipboard&&navigator.clipboard.writeText){ navigator.clipboard.writeText(text).then(()=>resolve(true)).catch(fallback); }
+    else fallback();
+  });
+}
+function copyText(t,msg){ doCopy(t).then(ok=>toast(ok?msg:"Couldn't copy — select the text in the box and copy manually")); }
+
+/* Condensed, self-contained authoring contract for a cold-start chat (no repo files present). */
+const AGENT_PROMPT = [
+"You are creating a workflow for AgentFlow, a visual tool whose diagrams become execution context for Claude. Translate the sketch / description I give you into a JSON file I will open with AgentFlow's \"Open .json\" button.",
+"",
+"OUTPUT: a single JSON object. Do NOT include x/y coordinates — the app auto-lays-out the graph. Schema:",
+"{",
+"  \"name\": \"short name\",",
+"  \"nodes\": [ { \"id\": \"unique-string\", \"type\": \"<one type below>\", \"data\": { \"title\": \"...\", ...fields... } } ],",
+"  \"edges\": [ { \"from\": \"id\", \"to\": \"id\", \"label\": \"\" } ]",
+"}",
+"",
+"NODE TYPES (data fields are all strings; always set title):",
+"- start    one per workflow, at the entry. The goal + global context. data: title, objective, context, constraints",
+"- step     a unit of work. data: title, goal (=intent/why), instructions, inputs, outputs, references, acceptance (=done when)",
+"- subagent delegated work. data: title, agent (e.g. Explore, general-purpose), goal, instructions, inputs, outputs, acceptance",
+"- decision a branch. data: title (phrase as a question), criteria. MUST have 2+ outgoing edges, each with a label (Yes/No/...).",
+"- gate     a human-approval checkpoint; flow pauses. data: title, review, criteria. Usually one outgoing edge labeled \"approved\".",
+"- context  reference material, not a step. data: title, content",
+"- end      the final deliverable; no outgoing edges. data: title, deliverable, success",
+"",
+"RULES:",
+"- edges.from / edges.to must match node ids. Dangling edges are dropped, so double-check them.",
+"- Loops are allowed (an edge back to an earlier node) for revise/resubmit cycles.",
+"- Never draw an edge into a start node or out of an end node.",
+"- Fill goal, and inputs/outputs where steps chain — they make execution reliable.",
+"",
+"READING A SKETCH (shape -> type): titled goal box -> start; rectangle -> step; \"delegate/ask an agent\" -> subagent; diamond or a question with branches -> decision; \"review / sign-off\" -> gate; a note of references -> context; a terminal \"done/shipped\" -> end. If ambiguous, use step.",
+"",
+"EXAMPLE:",
+"{\"name\":\"Feature flow\",\"nodes\":[",
+"  {\"id\":\"goal\",\"type\":\"start\",\"data\":{\"title\":\"Objective\",\"objective\":\"Ship feature X\",\"constraints\":\"Match design system\"}},",
+"  {\"id\":\"disc\",\"type\":\"step\",\"data\":{\"title\":\"Discovery\",\"goal\":\"Understand the problem first\",\"outputs\":\"Problem statement\"}},",
+"  {\"id\":\"ok\",\"type\":\"decision\",\"data\":{\"title\":\"Approved?\",\"criteria\":\"Does it meet the objective?\"}},",
+"  {\"id\":\"build\",\"type\":\"step\",\"data\":{\"title\":\"Build\",\"inputs\":\"Problem statement\",\"acceptance\":\"Tests pass\"}},",
+"  {\"id\":\"done\",\"type\":\"end\",\"data\":{\"title\":\"Done\",\"deliverable\":\"Shipped feature\"}}",
+"],\"edges\":[",
+"  {\"from\":\"goal\",\"to\":\"disc\"},{\"from\":\"disc\",\"to\":\"ok\"},",
+"  {\"from\":\"ok\",\"to\":\"build\",\"label\":\"Yes\"},{\"from\":\"ok\",\"to\":\"disc\",\"label\":\"No\"},",
+"  {\"from\":\"build\",\"to\":\"done\"}",
+"]}",
+"",
+"When finished, output ONLY the JSON, then tell me: \"Save this as workflow.json and open it in AgentFlow via Open .json.\""
+].join("\n");
+
+const ACTIONS = {
+  "new":       ()=>{ if(confirm("Start a new blank workflow? Unsaved changes are lost.")) reset(); },
+  "open":      ()=> document.getElementById("fileInput").click(),
+  "importmd":  ()=> document.getElementById("mdInput").click(),
+  "exportjson":()=> download(slug()+".json",serialize()),
+  "exportmd":  ()=> showModal("Markdown export",toMarkdown(),slug()+".md"),
+  "copyclaude":()=> copyText(toMarkdown(),"Markdown copied — paste into Claude"),
+  "copyagent": ()=>{ copyText(AGENT_PROMPT,"Agent prompt copied"); showModal("Agent prompt — paste into any Claude session, then attach your sketch",AGENT_PROMPT,"agentflow-agent-prompt.txt"); },
+};
+document.querySelectorAll(".menu").forEach(menu=>{
+  const btn=menu.querySelector(".menu-btn");
+  btn.addEventListener("click",e=>{ e.stopPropagation(); const open=menu.classList.contains("open"); document.querySelectorAll(".menu.open").forEach(m=>m.classList.remove("open")); if(!open)menu.classList.add("open"); });
+  menu.querySelectorAll("[data-act]").forEach(it=>it.addEventListener("click",e=>{ e.stopPropagation(); document.querySelectorAll(".menu.open").forEach(m=>m.classList.remove("open")); const fn=ACTIONS[it.dataset.act]; if(fn)fn(); }));
+});
+document.addEventListener("click",()=>document.querySelectorAll(".menu.open").forEach(m=>m.classList.remove("open")));
+
+document.getElementById("fileInput").onchange=e=>{
+  const f=e.target.files[0]; if(!f)return; const r=new FileReader();
+  r.onload=()=>{ try{ loadData(JSON.parse(r.result)); toast("Loaded "+f.name); }catch(err){ toast("Invalid JSON"); } };
+  r.readAsText(f); e.target.value="";
+};
+
+/* modal */
+let modalDownloadName="export.txt";
+function showModal(title,text,dlname){
+  document.getElementById("modalTitle").textContent=title;
+  document.getElementById("modalPre").textContent=text;
+  modalDownloadName=dlname;
+  document.getElementById("modal").style.display="flex";
+}
+document.getElementById("modalClose").onclick=()=>document.getElementById("modal").style.display="none";
+document.getElementById("modalCopy").onclick=()=>{ doCopy(document.getElementById("modalPre").textContent).then(ok=>toast(ok?"Copied":"Select the text manually to copy")); };
+document.getElementById("modalDownload").onclick=()=>download(modalDownloadName,document.getElementById("modalPre").textContent);
+document.getElementById("modal").addEventListener("mousedown",e=>{ if(e.target.id==="modal")e.target.style.display="none"; });
+
+/* toast */
+let toastT;
+function toast(msg){ const t=document.getElementById("toast"); t.textContent=msg; t.classList.add("show"); clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove("show"),2200); }
+
+/* ---------- Persistence ---------- */
+function autosave(){ try{ localStorage.setItem("agentflow",serialize()); }catch(e){} }
+function safeGet(k){ try{ return localStorage.getItem(k); }catch(e){ return null; } }
+function normalizeLoaded(d){
+  // Tolerant ingest for agent-authored JSON: ids optional, coords optional,
+  // unknown types coerced to step, dangling edges dropped.
+  const nodes=(d.nodes||[]).map(n=>({
+    id:(n.id!=null&&n.id!=="")?String(n.id):nid(),
+    type:TYPES[n.type]?n.type:"step",
+    x:n.x, y:n.y,
+    data:Object.assign({}, n.data||{})
+  }));
+  const seen=new Set();
+  nodes.forEach(n=>{ while(seen.has(n.id))n.id=nid(); seen.add(n.id); });
+  const ids=new Set(nodes.map(n=>n.id));
+  const edges=(d.edges||[]).filter(e=>e&&ids.has(String(e.from))&&ids.has(String(e.to)))
+    .map(e=>({id:(e.id!=null&&e.id!=="")?String(e.id):("e"+(uid++)),from:String(e.from),to:String(e.to),label:e.label||""}));
+  const laidOut = nodes.some(n=>!isFinite(n.x)||!isFinite(n.y));
+  if(laidOut) layoutGraph(nodes,edges);
+  return {name:d.name||"Untitled Workflow",nodes,edges,laidOut};
+}
+function loadData(d){
+  // reconcile the id counter against any ids the file already uses
+  let max=0;
+  (d.nodes||[]).forEach(n=>{ if(n&&n.id){const m=/\d+/.exec(n.id);if(m)max=Math.max(max,+m[0]);} });
+  (d.edges||[]).forEach(e=>{ if(e&&e.id){const m=/\d+/.exec(e.id);if(m)max=Math.max(max,+m[0]);} });
+  uid=max+1;
+  const r=normalizeLoaded(d);
+  state={name:r.name,nodes:r.nodes,edges:r.edges};
+  if(d.view && !r.laidOut) view=d.view; else view={x:40,y:40,s:0.9};
+  sel=null; multi.clear(); applyView(); render(); renderProps(); autosave();
+}
+function reset(){ state={name:"Untitled Workflow",nodes:[],edges:[]}; view={x:60,y:60,s:1}; sel=null; uid=1; seedExample(); render(); renderProps(); autosave(); }
+
+/* rename via clicking status */
+document.getElementById("statusHint").style.cursor="pointer";
+document.getElementById("statusHint").title="Click to rename workflow";
+document.getElementById("statusHint").onclick=()=>{ const n=prompt("Workflow name:",state.name); if(n){state.name=n;updateStatus();autosave();} };
+
+/* ---------- Example seed ---------- */
+function seedExample(){
+  state.name="Example: Feature Design Flow";
+  state.nodes=[
+    {id:"n1",type:"start",x:40,y:200,data:{title:"Objective",objective:"Design and ship a new feature to a high, consistent quality bar.",context:"React + TypeScript app. Design system lives in /src/design. Users are internal ops staff.",constraints:"Match existing tokens. No new dependencies without approval. Accessibility AA."}},
+    {id:"n2",type:"step",x:300,y:200,data:{title:"Discovery",goal:"Understand the real problem before designing.",instructions:"Interview the request, map the user job, document constraints.",inputs:"Feature brief",outputs:"Problem statement + user job doc",references:"docs/brief.md",acceptance:"Problem and users are written down and agreed."}},
+    {id:"n3",type:"step",x:560,y:200,data:{title:"Wireframe",goal:"Explore layout cheaply before committing to visuals.",instructions:"Produce low-fi wireframes of the primary flow.",inputs:"Problem statement",outputs:"Wireframe set",acceptance:"Primary flow covered end to end."}},
+    {id:"n4",type:"decision",x:820,y:208,data:{title:"Design approved?",criteria:"Does the wireframe satisfy the objective and constraints?"}},
+    {id:"n5",type:"gate",x:1060,y:120,data:{title:"Human review",review:"The proposed direction and wireframes.",criteria:"Stakeholder signs off on direction."}},
+    {id:"n6",type:"subagent",x:1060,y:320,data:{title:"Revise",agent:"general-purpose",goal:"Address gaps found in review.",instructions:"Revise the wireframes per feedback and resubmit.",outputs:"Updated wireframes"}},
+    {id:"n7",type:"step",x:1320,y:120,data:{title:"Build",goal:"Implement the approved design faithfully.",instructions:"Build components using the design system tokens.",inputs:"Approved wireframes",outputs:"Working feature",acceptance:"Matches design, passes lint + tests."}},
+    {id:"n8",type:"end",x:1580,y:120,data:{title:"Shipped feature",deliverable:"Merged, tested feature behind a flag.",success:"Meets acceptance criteria and design bar."}},
+  ];
+  state.edges=[
+    {id:"e1",from:"n1",to:"n2",label:""},
+    {id:"e2",from:"n2",to:"n3",label:""},
+    {id:"e3",from:"n3",to:"n4",label:""},
+    {id:"e4",from:"n4",to:"n5",label:"Yes"},
+    {id:"e5",from:"n4",to:"n6",label:"No"},
+    {id:"e6",from:"n6",to:"n3",label:"resubmit"},
+    {id:"e7",from:"n5",to:"n7",label:"approved"},
+    {id:"e8",from:"n7",to:"n8",label:""},
+  ];
+  uid=9;
+}
+
+/* ---------- Library / Templates ---------- */
+function builtinTemplates(){
+  return [
+    {id:"bi-review",name:"Design Review loop",builtin:true,nodes:[
+      {id:"a",type:"decision",x:0,y:60,data:{title:"Approved?",criteria:"Does the work meet the objective and constraints?"}},
+      {id:"b",type:"gate",x:250,y:0,data:{title:"Human review",review:"The proposed direction / artifact.",criteria:"Stakeholder signs off."}},
+      {id:"c",type:"subagent",x:250,y:170,data:{title:"Revise",agent:"general-purpose",goal:"Address the gaps found in review.",instructions:"Apply feedback and resubmit for another review.",outputs:"Revised artifact"}},
+    ],edges:[
+      {from:"a",to:"b",label:"Yes"},{from:"a",to:"c",label:"No"},
+    ]},
+    {id:"bi-discovery",name:"Discovery → Wireframe",builtin:true,nodes:[
+      {id:"a",type:"step",x:0,y:0,data:{title:"Discovery",goal:"Understand the real problem before designing.",instructions:"Map the user job, capture constraints.",outputs:"Problem statement",acceptance:"Problem + users documented."}},
+      {id:"b",type:"step",x:250,y:0,data:{title:"Wireframe",goal:"Explore layout cheaply first.",instructions:"Produce low-fi wireframes of the primary flow.",inputs:"Problem statement",outputs:"Wireframe set",acceptance:"Primary flow covered end to end."}},
+    ],edges:[{from:"a",to:"b",label:""}]},
+    {id:"bi-spike",name:"Research spike",builtin:true,nodes:[
+      {id:"a",type:"subagent",x:0,y:0,data:{title:"Explore options",agent:"Explore",goal:"Cheaply survey the solution space before committing.",instructions:"Investigate approaches and trade-offs; report findings.",outputs:"Options + recommendation"}},
+      {id:"b",type:"step",x:250,y:0,data:{title:"Synthesize",goal:"Turn findings into a decision.",instructions:"Pick an approach and record the rationale.",inputs:"Options + recommendation",outputs:"Decision record",acceptance:"Chosen approach + why is written down."}},
+    ],edges:[{from:"a",to:"b",label:""}]},
+  ];
+}
+let userLibrary=[];
+(function loadUserLib(){ try{ const s=safeGet("agentflow-lib"); if(s)userLibrary=JSON.parse(s)||[]; }catch(e){ userLibrary=[]; } })();
+function saveUserLib(){ try{ localStorage.setItem("agentflow-lib",JSON.stringify(userLibrary)); }catch(e){} }
+
+function viewCenterWorld(){ const r=svg.getBoundingClientRect(); return screenToWorld(r.left+r.width/2, r.top+r.height/2); }
+function insertBlock(block){
+  const c=viewCenterWorld();
+  const minx=Math.min(...block.nodes.map(n=>n.x)), miny=Math.min(...block.nodes.map(n=>n.y));
+  const map={};
+  multi.clear();
+  block.nodes.forEach(bn=>{ const id=nid(); map[bn.id]=id; state.nodes.push({id,type:bn.type,x:Math.round(c.x-90+(bn.x-minx)),y:Math.round(c.y-42+(bn.y-miny)),data:Object.assign({},bn.data)}); multi.add(id); });
+  (block.edges||[]).forEach(be=>{ if(map[be.from]&&map[be.to]) state.edges.push({id:"e"+(uid++),from:map[be.from],to:map[be.to],label:be.label||""}); });
+  sel=null; render(); renderProps(); autosave(); closeLib(); toast(`Inserted “${block.name}”`);
+}
+function saveSelectionAsBlock(){
+  const chosen = multi.size>0 ? state.nodes.filter(n=>multi.has(n.id)) : state.nodes.slice();
+  if(!chosen.length){ toast("Nothing on the canvas to save"); return; }
+  const name=prompt(`Name this block${multi.size>0?"":" (whole workflow)"}:`, multi.size>0?"My block":state.name);
+  if(!name)return;
+  const ids=new Set(chosen.map(n=>n.id));
+  const minx=Math.min(...chosen.map(n=>n.x)), miny=Math.min(...chosen.map(n=>n.y));
+  const nodes=chosen.map(n=>({id:n.id,type:n.type,x:n.x-minx,y:n.y-miny,data:Object.assign({},n.data)}));
+  const edges=state.edges.filter(e=>ids.has(e.from)&&ids.has(e.to)).map(e=>({from:e.from,to:e.to,label:e.label||""}));
+  userLibrary.push({id:"u"+Date.now(),name,nodes,edges});
+  saveUserLib(); renderLibList(); toast("Saved to library");
+}
+function renderLibList(){
+  const el=document.getElementById("libList");
+  const row=(b)=>`<div class="lib-row" data-id="${b.id}">
+      <div class="grow"><div class="name">${esc(b.name)}</div>
+      <div class="meta">${b.nodes.length} node${b.nodes.length!==1?"s":""}${b.builtin?"":" · custom"}</div></div>
+      ${b.builtin?'<span class="tag">built-in</span>':'<button class="btn" data-del="'+b.id+'">Delete</button>'}
+      <button class="btn primary" data-ins="${b.id}">Insert</button></div>`;
+  let html=`<div class="lib-section">Built-in blocks</div>`;
+  html+=builtinTemplates().map(row).join("");
+  html+=`<div class="lib-section" style="margin-top:16px">Your blocks</div>`;
+  html+= userLibrary.length? userLibrary.map(row).join("") : '<div class="lib-empty">None yet. Select nodes (Shift-click) and use “Save selection as block”, or save the whole workflow.</div>';
+  el.innerHTML=html;
+  const all=()=>builtinTemplates().concat(userLibrary);
+  el.querySelectorAll("[data-ins]").forEach(b=>b.onclick=()=>{ const blk=all().find(x=>x.id===b.dataset.ins); if(blk)insertBlock(blk); });
+  el.querySelectorAll("[data-del]").forEach(b=>b.onclick=()=>{ userLibrary=userLibrary.filter(x=>x.id!==b.dataset.del); saveUserLib(); renderLibList(); });
+}
+function openLib(){ renderLibList(); document.getElementById("libModal").style.display="flex"; }
+function closeLib(){ document.getElementById("libModal").style.display="none"; }
+document.getElementById("libBtn").onclick=openLib;
+document.getElementById("libClose").onclick=closeLib;
+document.getElementById("saveBlockBtn").onclick=saveSelectionAsBlock;
+document.getElementById("libModal").addEventListener("mousedown",e=>{ if(e.target.id==="libModal")closeLib(); });
+
+/* ---------- Import Markdown (round-trip of AgentFlow export) ---------- */
+document.getElementById("mdInput").onchange=e=>{
+  const f=e.target.files[0]; if(!f)return; const r=new FileReader();
+  r.onload=()=>{ try{ if(state.nodes.length && !confirm("Replace the current canvas with the imported workflow?")) return; importMarkdown(r.result); toast("Imported "+f.name); }catch(err){ console.error(err); toast("Couldn't parse that markdown"); } };
+  r.readAsText(f); e.target.value="";
+};
+function appendLine(a,b){ b=(b||"").trim(); return a? a+"\n"+b : b; }
+function parseRefs(s){ const out=[]; const re=/\*\*(.+?)\*\*(?:\s*\(step\s+(\d+)\))?(?:\s*\(([^)]+)\))?/g; let m; while(m=re.exec(s)){ out.push({title:m[1].trim(),no:m[2]?parseInt(m[2]):null,label:(m[3]||"").trim()}); } return out; }
+function parseStepHead(head){
+  const noM=head.match(/^(\d+)\.\s*(.*)/);
+  const no=noM?parseInt(noM[1]):null;
+  let rest=(noM?noM[2]:head).trim();
+  const s={no,type:"step",data:{},next:[]};
+  if(/^Decision\s+—/i.test(rest)){ s.type="decision"; s.data.title=rest.replace(/^Decision\s+—\s*/i,"").trim(); }
+  else if(/Gate\s+—/i.test(rest)){ s.type="gate"; s.data.title=rest.replace(/.*Gate\s+—\s*/i,"").trim(); }
+  else if(/Deliverable\s+—/i.test(rest)){ s.type="end"; s.data.title=rest.replace(/.*Deliverable\s+—\s*/i,"").trim(); }
+  else if(/—\s*delegate/i.test(rest)){ s.type="subagent"; const am=rest.match(/^(.*?)\s+—\s*delegate(?:\s+to\s+`(.+?)`)?/i); s.data.title=am?am[1].trim():rest; if(am&&am[2])s.data.agent=am[2].trim(); }
+  else { s.type="step"; s.data.title=rest; }
+  return s;
+}
+function parseStepBody(cur,t){
+  if(!t)return; let m;
+  if(m=t.match(/^-\s+\*\*Next:\*\*\s*(.*)/i)){ parseRefs(m[1]).forEach(r=>cur.next.push(r)); return; }
+  if(m=t.match(/^-\s+\*\*(Intent|Do|Inputs|Outputs|References|Done when):\*\*\s*(.*)/i)){
+    const map={intent:"goal",do:"instructions",inputs:"inputs",outputs:"outputs",references:"references","done when":"acceptance"};
+    cur.data[map[m[1].toLowerCase()]]=m[2].trim(); return;
+  }
+  if(m=t.match(/^How to decide:\s*(.*)/i)){ cur.data.criteria=m[1].trim(); return; }
+  if(cur.type==="decision" && (m=t.match(/^-\s+\*\*(.+?)\*\*\s*→\s*go to\s+(.*)/))){ const label=m[1].trim(); parseRefs(m[2]).forEach(r=>{r.label=label;cur.next.push(r);}); return; }
+  if(m=t.match(/^-\s+Review:\s*(.*)/i)){ cur.data.review=m[1].trim(); return; }
+  if(m=t.match(/^-\s+Approve when:\s*(.*)/i)){ cur.data.criteria=m[1].trim(); return; }
+  if(m=t.match(/^-\s+On approval\s*→\s*(.*)/i)){ parseRefs(m[1]).forEach(r=>{r.label=r.label||"approved";cur.next.push(r);}); return; }
+  if(m=t.match(/^-\s+Success when:\s*(.*)/i)){ cur.data.success=m[1].trim(); return; }
+  if(/^Pause for human approval/i.test(t))return;
+  if(cur.type==="end" && !t.startsWith("-")){ cur.data.deliverable=appendLine(cur.data.deliverable||"",t); return; }
+}
+function layoutGraph(nodesArr,edgesArr){
+  const depth={}; const roots=nodesArr.filter(n=>n.type==="start");
+  const seeds=roots.length?roots:nodesArr.filter(n=>!edgesArr.some(e=>e.to===n.id));
+  const q=[]; seeds.forEach(s=>{depth[s.id]=0;q.push(s.id);});
+  let guard=0;
+  while(q.length && guard++<9999){ const id=q.shift(); edgesArr.filter(e=>e.from===id).forEach(e=>{ if(depth[e.to]==null){depth[e.to]=depth[id]+1;q.push(e.to);} }); }
+  const rows={};
+  nodesArr.forEach(n=>{ let d=depth[n.id]; if(d==null)d=0; (rows[d]=rows[d]||[]).push(n); });
+  Object.keys(rows).forEach(d=>{ rows[d].forEach((n,idx)=>{ n.x=40+(+d)*250; n.y=40+idx*130; }); });
+}
+function importMarkdown(md){
+  const lines=md.split(/\r?\n/);
+  let name="Imported workflow";
+  const startData={title:"Objective",objective:"",context:"",constraints:""};
+  let hasStart=false; const contexts=[]; const steps=[]; let mode=null, cur=null;
+  for(const raw of lines){
+    const line=raw.replace(/\s+$/,""); const t=line.trim(); let m;
+    if(m=line.match(/^#\s+Workflow:\s*(.*)/i)){ name=m[1].trim(); continue; }
+    if(m=line.match(/^##\s+(.*)/)){
+      const h=m[1].trim().toLowerCase(); cur=null;
+      if(h.startsWith("objective")){mode="objective";hasStart=true;}
+      else if(h.startsWith("global context")){mode="gcontext";hasStart=true;}
+      else if(h.startsWith("constraints")){mode="constraints";hasStart=true;}
+      else if(h.startsWith("reference material")){mode="ref";}
+      else if(h.startsWith("steps")){mode="steps";}
+      else mode=null;
+      continue;
+    }
+    if(m=line.match(/^###\s+(.*)/)){ cur=parseStepHead(m[1].trim()); steps.push(cur); mode="step"; continue; }
+    if(/^>/.test(t)) continue;
+    if(mode==="objective" && t){ startData.objective=appendLine(startData.objective,t); continue; }
+    if(mode==="gcontext" && t){ startData.context=appendLine(startData.context,t); continue; }
+    if(mode==="constraints" && t){ startData.constraints=appendLine(startData.constraints,t); continue; }
+    if(mode==="ref"){ if(m=t.match(/^-\s+\*\*(.+?)\*\*:?\s*(.*)/)) contexts.push({title:m[1].trim(),content:(m[2]||"").trim()}); continue; }
+    if(mode==="step" && cur){ parseStepBody(cur,t); continue; }
+  }
+  const outNodes=[], outEdges=[], numMap={}, titleMap={};
+  let startNode=null;
+  if(hasStart){ startNode={id:nid(),type:"start",x:0,y:0,data:{title:startData.title,objective:startData.objective,context:startData.context,constraints:startData.constraints}}; outNodes.push(startNode); }
+  contexts.forEach(c=>{ outNodes.push({id:nid(),type:"context",x:0,y:0,data:{title:c.title,content:c.content}}); });
+  steps.forEach(s=>{ s.id=nid(); if(s.no!=null)numMap[s.no]=s.id; if(s.data.title)titleMap[s.data.title.toLowerCase()]=s.id; outNodes.push({id:s.id,type:s.type,x:0,y:0,data:Object.assign({},s.data)}); });
+  steps.forEach(s=>{ s.next.forEach(r=>{ let tid=r.no!=null?numMap[r.no]:null; if(!tid&&r.title)tid=titleMap[r.title.toLowerCase()]; if(tid)outEdges.push({id:"e"+(uid++),from:s.id,to:tid,label:r.label||""}); }); });
+  if(startNode && steps.length){ let first=null; steps.forEach(s=>{ if(!first || (s.no||1e9)<(first.no||1e9))first=s; }); if(first)outEdges.push({id:"e"+(uid++),from:startNode.id,to:first.id,label:""}); }
+  layoutGraph(outNodes,outEdges);
+  state={name,nodes:outNodes,edges:outEdges}; view={x:40,y:40,s:0.9}; sel=null; multi.clear(); applyView(); render(); renderProps(); autosave();
+}
+
+/* ---------- Boot ---------- */
+(function boot(){
+  const saved=safeGet("agentflow");
+  if(saved){ try{ loadData(JSON.parse(saved)); return; }catch(e){} }
+  seedExample(); render(); renderProps();
+})();
+</script>
+</body>
+</html>

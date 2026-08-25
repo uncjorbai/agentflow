@@ -1,0 +1,156 @@
+{
+  "name": "Financial Close Pipeline (Databricks Medallion)",
+  "nodes": [
+    { "id": "obj", "type": "start", "x": 40, "y": 280, "data": {
+      "title": "Financial Close Pipeline",
+      "objective": "Automate the end-to-end financial close: ingest source financials, enforce data quality, produce statutory statements and management reporting, and publish a signed-off close on the Gold layer.",
+      "context": "Runs entirely in Databricks. 3-tier medallion (Bronze -> Silver -> Gold) on Delta Lake with Unity Catalog governance. Orchestrated by Databricks Workflows against the close calendar.",
+      "constraints": "Every layer must be reproducible and auditable (idempotent, versioned, lineage-tracked). No hard-coded metrics: KPIs are metadata-driven. Financials must tie out and be human-signed before publish."
+    }},
+    { "id": "std", "type": "context", "x": 40, "y": 480, "data": {
+      "title": "Platform & Close Standards",
+      "content": "Delta Lake tables; Unity Catalog schema per tier (bronze/silver/gold). PII masking applied at Silver. All jobs parameterized by close period. Expectations tracked via DLT / Great Expectations. GL is the source of truth for tie-outs."
+    }},
+    { "id": "bronze", "type": "step", "x": 300, "y": 280, "data": {
+      "title": "Bronze - Raw Ingestion",
+      "goal": "Land source financial data exactly as received for a durable, replayable record.",
+      "instructions": "Ingest GL, sub-ledgers (AP/AR/FA), bank statements, and FX rates into Bronze Delta tables with no transformation. Capture load metadata and source watermarks.",
+      "inputs": "ERP/GL exports, sub-ledger feeds, bank files, FX rate feed",
+      "outputs": "bronze.* raw Delta tables (append-only, partitioned by load date)",
+      "acceptance": "All expected source files landed for the period; row counts and control totals match source manifests."
+    }},
+    { "id": "clean", "type": "step", "x": 560, "y": 280, "data": {
+      "title": "Cleaning & Conforming",
+      "goal": "Produce clean, consistent, canonical data before any accounting logic runs.",
+      "instructions": "Deduplicate, standardize types and currencies, map source accounts to the canonical chart of accounts, conform dimensions (entity, cost center, period), and apply PII masking.",
+      "inputs": "bronze.* tables",
+      "outputs": "Conformed staging tables ready for validation",
+      "acceptance": "Schema conforms to the canonical model; no duplicates; every record maps to a valid COA account and entity."
+    }},
+    { "id": "dq", "type": "decision", "x": 820, "y": 280, "data": {
+      "title": "Data quality gate - checks pass?",
+      "criteria": "Completeness (all entities/periods present), referential integrity (COA, dimensions), balance checks (debits = credits), and reconciliation to GL control totals within tolerance."
+    }},
+    { "id": "remediate", "type": "subagent", "x": 820, "y": 480, "data": {
+      "title": "Remediate & Reprocess",
+      "agent": "general-purpose",
+      "goal": "Resolve data quality failures without manual patching of downstream tables.",
+      "instructions": "Triage failed expectations, quarantine bad records, fix source/mapping issues, and re-run cleaning for the affected partitions.",
+      "inputs": "Failed DQ expectations + quarantined records",
+      "outputs": "Corrected staging data",
+      "acceptance": "All previously failing checks pass on re-run."
+    }},
+    { "id": "silver", "type": "step", "x": 1080, "y": 280, "data": {
+      "title": "Silver - Conformed & Validated",
+      "goal": "Provide a trusted, business-ready financial dataset as the single source for all Gold products.",
+      "instructions": "Publish validated, conformed Silver tables: journal entries, trial balance, and conformed dimensions for the close period.",
+      "inputs": "Validated staging tables",
+      "outputs": "silver.trial_balance, silver.journal_entries, silver.dim_* (governed, PII-safe)",
+      "acceptance": "Trial balance is balanced by entity and ties to GL; passes all Silver expectations."
+    }},
+    { "id": "kpi", "type": "subagent", "x": 1360, "y": 80, "data": {
+      "title": "KPI Metadata-Driven Engine",
+      "agent": "general-purpose",
+      "goal": "Compute financial KPIs from a metadata registry so new metrics require config, not code.",
+      "instructions": "Read KPI definitions (formula, grain, filters, target) from a metadata table and evaluate them against Silver to generate the metrics store.",
+      "inputs": "silver.* + kpi_definitions metadata",
+      "outputs": "gold.kpi_metrics (metric, entity, period, value, target, variance)",
+      "acceptance": "Every active KPI definition resolves and computes; results reconcile to the underlying Silver figures."
+    }},
+    { "id": "stmts", "type": "step", "x": 1360, "y": 280, "data": {
+      "title": "Statutory Financial Statements",
+      "goal": "Produce the three core statements from a single validated source.",
+      "instructions": "Build statement datasets from Silver trial balance and journal entries, mapped through statement-line taxonomies.",
+      "inputs": "silver.trial_balance, silver.journal_entries",
+      "outputs": "Three statement datasets (fan out below)",
+      "acceptance": "Statements are internally consistent (net income flows to equity and cash)."
+    }},
+    { "id": "custom", "type": "step", "x": 1360, "y": 500, "data": {
+      "title": "Custom Financial Reporting",
+      "goal": "Deliver management and analytical reporting beyond the statutory statements.",
+      "instructions": "Build curated report datasets - Sales Report, Expense Report, Forecast, and similar - from Silver and the KPI metrics store.",
+      "inputs": "silver.*, gold.kpi_metrics",
+      "outputs": "gold.rpt_sales, gold.rpt_expense, gold.rpt_forecast, ...",
+      "acceptance": "Each report reconciles to the statutory statements and KPI metrics for the period."
+    }},
+    { "id": "is", "type": "step", "x": 1640, "y": 180, "data": {
+      "title": "Income Statement",
+      "goal": "Report period revenue, expense, and profitability.",
+      "instructions": "Aggregate P&L accounts by statement line and entity for the period, with prior-period and budget comparatives.",
+      "inputs": "silver.trial_balance (P&L accounts)",
+      "outputs": "gold.income_statement",
+      "acceptance": "Net income matches the trial-balance P&L total by entity."
+    }},
+    { "id": "cf", "type": "step", "x": 1640, "y": 300, "data": {
+      "title": "Statement of Cash Flows",
+      "goal": "Report cash generated and used across operating, investing, and financing.",
+      "instructions": "Derive cash flow (indirect method) from balance-sheet movements and net income.",
+      "inputs": "gold.income_statement, silver.trial_balance (BS movements)",
+      "outputs": "gold.cash_flows",
+      "acceptance": "Net change in cash ties to the movement in cash accounts on the balance sheet."
+    }},
+    { "id": "bs", "type": "step", "x": 1640, "y": 420, "data": {
+      "title": "Balance Sheet",
+      "goal": "Report financial position at period end.",
+      "instructions": "Aggregate asset, liability, and equity accounts by statement line and entity at period end.",
+      "inputs": "silver.trial_balance (BS accounts)",
+      "outputs": "gold.balance_sheet",
+      "acceptance": "Assets = Liabilities + Equity for every entity."
+    }},
+    { "id": "gold", "type": "step", "x": 1940, "y": 280, "data": {
+      "title": "Gold - Curated & Published Marts",
+      "goal": "Assemble the certified serving layer for the close.",
+      "instructions": "Consolidate KPI metrics, statements, and custom reports into governed Gold marts with a semantic layer for BI tools.",
+      "inputs": "gold.kpi_metrics, statement datasets, custom reports",
+      "outputs": "Certified gold.* marts + BI semantic model",
+      "acceptance": "All Gold products present, versioned, and lineage-complete for the period."
+    }},
+    { "id": "recon", "type": "decision", "x": 2220, "y": 280, "data": {
+      "title": "Reconciliation & tie-out - balanced?",
+      "criteria": "Do the statements tie to the trial balance and to each other (net income -> equity -> cash), and are inter-company balances eliminated within tolerance?"
+    }},
+    { "id": "variance", "type": "subagent", "x": 2220, "y": 480, "data": {
+      "title": "Investigate Variances",
+      "agent": "general-purpose",
+      "goal": "Explain or correct any tie-out breaks before sign-off.",
+      "instructions": "Trace variances to source through lineage, correct mappings or logic, and rebuild the affected Gold products.",
+      "inputs": "Reconciliation break report",
+      "outputs": "Corrected Gold datasets + variance notes",
+      "acceptance": "All tie-outs pass on rebuild."
+    }},
+    { "id": "signoff", "type": "gate", "x": 2500, "y": 280, "data": {
+      "title": "Controller / CFO Sign-off",
+      "review": "Reconciled statements, the KPI pack, and material variance explanations for the period.",
+      "criteria": "Controller and CFO approve the close; all mandatory reconciliations signed."
+    }},
+    { "id": "close", "type": "end", "x": 2780, "y": 280, "data": {
+      "title": "Close Complete & Published",
+      "deliverable": "Signed-off statutory statements, KPI metrics, and management reports published on Gold and to BI.",
+      "success": "Close completed within the calendar; all statements tie out; sign-off recorded with full lineage and audit trail."
+    }}
+  ],
+  "edges": [
+    { "from": "obj", "to": "bronze", "label": "" },
+    { "from": "bronze", "to": "clean", "label": "" },
+    { "from": "clean", "to": "dq", "label": "" },
+    { "from": "dq", "to": "silver", "label": "Pass" },
+    { "from": "dq", "to": "remediate", "label": "Fail" },
+    { "from": "remediate", "to": "clean", "label": "reprocess" },
+    { "from": "silver", "to": "kpi", "label": "" },
+    { "from": "silver", "to": "stmts", "label": "" },
+    { "from": "silver", "to": "custom", "label": "" },
+    { "from": "stmts", "to": "is", "label": "" },
+    { "from": "stmts", "to": "cf", "label": "" },
+    { "from": "stmts", "to": "bs", "label": "" },
+    { "from": "kpi", "to": "gold", "label": "" },
+    { "from": "is", "to": "gold", "label": "" },
+    { "from": "cf", "to": "gold", "label": "" },
+    { "from": "bs", "to": "gold", "label": "" },
+    { "from": "custom", "to": "gold", "label": "" },
+    { "from": "gold", "to": "recon", "label": "" },
+    { "from": "recon", "to": "signoff", "label": "Balanced" },
+    { "from": "recon", "to": "variance", "label": "Variance" },
+    { "from": "variance", "to": "gold", "label": "rebuild" },
+    { "from": "signoff", "to": "close", "label": "Approved" }
+  ]
+}
