@@ -81,7 +81,23 @@
   .field-hint{font-size:10px;color:var(--muted);margin-top:2px}
   #delNode{margin-top:16px;width:100%;background:#2a1416;border-color:var(--gate);color:#ff9b95}
   /* modal */
-  #modal,#libModal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}
+  #modal,#libModal,#valModal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:50}
+  .validity{font-size:11px;padding:3px 9px;border-radius:6px;cursor:pointer;border:1px solid var(--border);margin-left:8px;user-select:none}
+  .validity.ok{color:var(--start);border-color:#1f5a2b}
+  .validity.warn{color:var(--decision);border-color:#5a4a1a}
+  .validity.err{color:var(--gate);border-color:#5a2320}
+  #valList{padding:12px}
+  .val-row{display:flex;align-items:center;gap:10px;padding:9px 11px;margin-bottom:6px;background:var(--panel2);border:1px solid var(--border);border-radius:8px}
+  .val-row[data-node]{cursor:pointer}
+  .val-row[data-node]:hover{border-color:var(--accent)}
+  .val-dot{width:9px;height:9px;border-radius:50%;flex:0 0 auto}
+  .val-row.error .val-dot{background:var(--gate)}
+  .val-row.warn .val-dot{background:var(--decision)}
+  .val-row.info .val-dot{background:var(--muted)}
+  .val-msg{flex:1;font-size:12.5px;line-height:1.35}
+  .val-go{font-size:11px;color:var(--accent);white-space:nowrap}
+  .val-ok{color:var(--start);font-size:13px;padding:12px;line-height:1.5}
+  .val-count{font-size:11px;color:var(--muted);margin:2px 2px 10px}
   #modalBox{background:var(--panel);border:1px solid var(--border);border-radius:10px;width:min(760px,92vw);max-height:86vh;display:flex;flex-direction:column}
   #modalHead{display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--border)}
   #modalHead h3{margin:0;font-size:14px}
@@ -124,6 +140,7 @@
     <button class="btn" id="libBtn">Library</button>
     <div class="spacer"></div>
     <span class="hint" id="statusHint"></span>
+    <span id="validity" class="validity" title="Workflow validation — click for details"></span>
   </header>
   <main>
     <div id="palette"></div>
@@ -146,6 +163,11 @@
 </div>
 <input type="file" id="fileInput" accept=".json" style="display:none">
 <input type="file" id="mdInput" accept=".md,.markdown,.txt" style="display:none">
+<div id="valModal"><div id="modalBox">
+  <div id="modalHead"><h3>Validation</h3><div style="flex:1"></div>
+    <button class="btn" id="valClose">Close</button></div>
+  <div id="modalBody"><div id="valList"></div></div>
+</div></div>
 <div id="libModal"><div id="modalBox">
   <div id="modalHead"><h3>Library</h3><div style="flex:1"></div>
     <button class="btn" id="saveBlockBtn">Save selection as block</button>
@@ -479,7 +501,90 @@ window.addEventListener("keydown",ev=>{
 /* ---------- Status ---------- */
 function updateStatus(){
   document.getElementById("statusHint").textContent=`${state.name} · ${state.nodes.length} nodes · ${state.edges.length} links`;
+  updateValidity();
 }
+
+/* ---------- Validation (graph integrity + workflow semantics) ---------- */
+function validate(){
+  const issues=[];
+  const nodes=state.nodes, edges=state.edges;
+  const T=n=>(n.data&&n.data.title&&n.data.title.trim())?n.data.title.trim():defaultTitle(n.type);
+  const out={}, inc={};
+  nodes.forEach(n=>{ out[n.id]=[]; inc[n.id]=[]; });
+  edges.forEach(e=>{ if(out[e.from])out[e.from].push(e); if(inc[e.to])inc[e.to].push(e); });
+  const starts=nodes.filter(n=>n.type==="start");
+  const ends=nodes.filter(n=>n.type==="end");
+  const add=(level,msg,node)=>issues.push({level,msg,node});
+
+  if(nodes.length===0) return issues;
+  if(starts.length===0) add("warn","No Objective (start) node — the export has no goal/context anchor.");
+  if(starts.length>1) add("warn",`${starts.length} Objective nodes — exports read clearest with exactly one.`);
+  if(ends.length===0) add("warn","No Deliverable (end) node — the workflow has no defined finish.");
+
+  nodes.forEach(n=>{
+    const o=out[n.id].length, i=inc[n.id].length;
+    if(n.type==="start" && i>0) add("error",`"${T(n)}" is an Objective but has an incoming edge — nothing should point into the start.`,n.id);
+    if(n.type==="end" && o>0) add("error",`"${T(n)}" is a Deliverable but has an outgoing edge — nothing should leave the end.`,n.id);
+    if(!n.data||!n.data.title||!n.data.title.trim()) add("warn",`A ${TYPES[n.type].label} node has no title.`,n.id);
+    // connectivity (skip context — reference material may float)
+    if(n.type!=="context"){
+      if(o===0 && i===0 && n.type!=="start") add("warn",`"${T(n)}" is not connected to anything.`,n.id);
+      else if(o===0 && n.type!=="end") add("warn",`"${T(n)}" has no next step (dead end). Connect it, or make it a Deliverable.`,n.id);
+    }
+    if(n.type==="start" && o===0 && nodes.length>1) add("warn",`Objective "${T(n)}" isn't connected to a first step.`,n.id);
+    if(n.type==="decision"){
+      if(o<2) add("warn",`Decision "${T(n)}" has ${o} branch${o===1?"":"es"} — a decision needs at least 2.`,n.id);
+      const unl=out[n.id].filter(e=>!e.label||!e.label.trim()).length;
+      if(unl>0) add("warn",`Decision "${T(n)}" has ${unl} unlabeled branch${unl===1?"":"es"} — label them (e.g. Yes / No).`,n.id);
+    }
+    if(n.type==="gate" && o===0) add("warn",`Gate "${T(n)}" has no exit — add the on-approval next step.`,n.id);
+    if(n.type==="context" && (o>0||i>0)) add("info",`Context "${T(n)}" is wired with an edge — context is usually unlinked reference material.`,n.id);
+    out[n.id].forEach(e=>{ if(e.to===n.id) add("warn",`"${T(n)}" links to itself.`,n.id); });
+  });
+
+  // unreachable from the Objective (only meaningful when a start exists; skip orphans already flagged)
+  if(starts.length){
+    const seen=new Set(); const q=[];
+    starts.forEach(s=>{ seen.add(s.id); q.push(s.id); });
+    while(q.length){ const id=q.shift(); (out[id]||[]).forEach(e=>{ if(!seen.has(e.to)){ seen.add(e.to); q.push(e.to); } }); }
+    nodes.forEach(n=>{ if(n.type!=="context" && n.type!=="start" && !seen.has(n.id) && (out[n.id].length+inc[n.id].length)>0) add("warn",`"${T(n)}" is unreachable from the Objective.`,n.id); });
+  }
+  return issues;
+}
+function updateValidity(){
+  const el=document.getElementById("validity"); if(!el)return;
+  const issues=validate();
+  const errs=issues.filter(i=>i.level==="error").length;
+  if(!state.nodes.length){ el.textContent=""; el.className="validity"; return; }
+  if(issues.length===0){ el.textContent="✓ Valid"; el.className="validity ok"; }
+  else { el.textContent=`⚠ ${issues.length} issue${issues.length===1?"":"s"}`; el.className="validity "+(errs?"err":"warn"); }
+}
+function focusNode(id){
+  const n=getNode(id); if(!n)return;
+  select({kind:"node",id});
+  const r=svg.getBoundingClientRect();
+  view.s=Math.max(view.s,0.85);
+  view.x=r.width/2-(n.x+NODE_W/2)*view.s;
+  view.y=r.height/2-(n.y+NODE_H/2)*view.s;
+  applyView();
+}
+function renderValList(){
+  const issues=validate();
+  const el=document.getElementById("valList");
+  if(!issues.length){ el.innerHTML='<div class="val-ok">✓ No issues — this workflow is well-formed and ready to hand off.</div>'; return; }
+  const rank={error:0,warn:1,info:2};
+  issues.sort((a,b)=>rank[a.level]-rank[b.level]);
+  const e=issues.filter(i=>i.level==="error").length, w=issues.filter(i=>i.level==="warn").length, inf=issues.filter(i=>i.level==="info").length;
+  const parts=[]; if(e)parts.push(e+" error"+(e>1?"s":"")); if(w)parts.push(w+" warning"+(w>1?"s":"")); if(inf)parts.push(inf+" note"+(inf>1?"s":""));
+  el.innerHTML=`<div class="val-count">${parts.join(" · ")} — click an item to jump to it</div>`+
+    issues.map(is=>`<div class="val-row ${is.level}"${is.node?` data-node="${is.node}"`:""}><span class="val-dot"></span><span class="val-msg">${esc(is.msg)}</span>${is.node?'<span class="val-go">Go to →</span>':''}</div>`).join("");
+  el.querySelectorAll("[data-node]").forEach(r=>r.onclick=()=>{ focusNode(r.dataset.node); closeVal(); });
+}
+function openVal(){ renderValList(); document.getElementById("valModal").style.display="flex"; }
+function closeVal(){ document.getElementById("valModal").style.display="none"; }
+document.getElementById("validity").onclick=openVal;
+document.getElementById("valClose").onclick=closeVal;
+document.getElementById("valModal").addEventListener("mousedown",e=>{ if(e.target.id==="valModal")closeVal(); });
 
 /* ---------- Compile to Markdown ---------- */
 function orderedNodes(){
@@ -739,6 +844,23 @@ function builtinTemplates(){
       {id:"a",type:"subagent",x:0,y:0,data:{title:"Explore options",agent:"Explore",goal:"Cheaply survey the solution space before committing.",instructions:"Investigate approaches and trade-offs; report findings.",outputs:"Options + recommendation"}},
       {id:"b",type:"step",x:250,y:0,data:{title:"Synthesize",goal:"Turn findings into a decision.",instructions:"Pick an approach and record the rationale.",inputs:"Options + recommendation",outputs:"Decision record",acceptance:"Chosen approach + why is written down."}},
     ],edges:[{from:"a",to:"b",label:""}]},
+    {id:"bi-medallion",name:"Medallion pipeline (Bronze → Silver → Gold)",builtin:true,nodes:[
+      {id:"br","type":"step","x":0,"y":60,data:{title:"Bronze - Raw Ingestion",goal:"Land source data exactly as received, replayable.",instructions:"Ingest sources into Bronze with no transformation; capture load metadata and watermarks.",outputs:"bronze.* raw tables"}},
+      {id:"cl","type":"step","x":250,"y":60,data:{title:"Cleaning & Conforming",goal:"Clean, consistent, canonical data before any business logic runs.",instructions:"Deduplicate, standardize types/units, conform dimensions, apply masking.",inputs:"bronze.*",outputs:"Conformed staging tables"}},
+      {id:"dq","type":"decision","x":500,"y":60,data:{title:"Data quality gate - pass?",criteria:"Completeness, schema/type conformance, referential integrity, and business-rule checks within tolerance."}},
+      {id:"rm","type":"subagent","x":500,"y":250,data:{title:"Remediate & Reprocess",agent:"general-purpose",goal:"Fix data-quality failures at source, not downstream.",instructions:"Triage failed checks, quarantine bad records, fix source/mapping, and re-run the affected partitions.",outputs:"Corrected staging data"}},
+      {id:"si","type":"step","x":750,"y":60,data:{title:"Silver - Conformed & Validated",goal:"Trusted, business-ready single source for all Gold products.",inputs:"Validated staging tables",outputs:"silver.* conformed tables",acceptance:"Passes all Silver expectations; keys/joins validated."}},
+      {id:"go","type":"step","x":1000,"y":60,data:{title:"Gold - Curated & Serving",goal:"Business-level marts / aggregates for consumption.",inputs:"silver.*",outputs:"gold.* marts + semantic layer",acceptance:"Products present, versioned, and lineage-complete."}}
+    ],edges:[
+      {from:"br",to:"cl",label:""},{from:"cl",to:"dq",label:""},{from:"dq",to:"si",label:"Pass"},{from:"dq",to:"rm",label:"Fail"},{from:"rm",to:"cl",label:"reprocess"},{from:"si",to:"go",label:""}
+    ]},
+    {id:"bi-dqgate",name:"Data quality gate",builtin:true,nodes:[
+      {id:"dq","type":"decision","x":0,"y":60,data:{title:"Quality checks pass?",criteria:"Completeness, schema/type conformance, referential integrity, and business rules within tolerance."}},
+      {id:"ok","type":"step","x":250,"y":0,data:{title:"Proceed",goal:"Continue once the data is trustworthy.",inputs:"Validated data"}},
+      {id:"rm","type":"subagent","x":250,"y":160,data:{title:"Remediate & Reprocess",agent:"general-purpose",goal:"Resolve failures at source before continuing.",instructions:"Triage failed checks, quarantine bad records, fix, and re-run.",outputs:"Corrected data"}}
+    ],edges:[
+      {from:"dq",to:"ok",label:"Pass"},{from:"dq",to:"rm",label:"Fail"},{from:"rm",to:"dq",label:"re-check"}
+    ]},
   ];
 }
 let userLibrary=[];
