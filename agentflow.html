@@ -134,6 +134,7 @@
         <button data-act="exportjson">Export .json…</button>
         <button data-act="exportmd">Export .md…</button>
         <button data-act="exportmmd">Export .mmd…</button>
+        <button data-act="exportpng">Export .png (image)</button>
         <div class="menu-sep"></div>
         <button data-act="copyclaude">Copy for Claude (Markdown)</button>
         <button data-act="copyagent">Copy Agent Prompt</button>
@@ -754,6 +755,62 @@ function download(filename,text){
 }
 const slug=()=>state.name.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")||"workflow";
 
+/* ---------- PNG export (serialize SVG -> canvas -> download) ---------- */
+function inlineStyles(orig,clone){
+  const props=["fill","fill-opacity","stroke","stroke-width","stroke-dasharray","stroke-linejoin","opacity","font-family","font-size","font-weight","font-style","letter-spacing","text-anchor","dominant-baseline"];
+  const cs=getComputedStyle(orig); let s="";
+  props.forEach(p=>{ const v=cs.getPropertyValue(p); if(v&&v!=="normal") s+=`${p}:${v};`; });
+  clone.setAttribute("style",s);
+  const oc=orig.children, cc=clone.children;
+  for(let i=0;i<oc.length;i++){ if(cc[i]) inlineStyles(oc[i],cc[i]); }
+}
+function exportPng(scale){
+  if(!state.nodes.length){ toast("Nothing to export"); return; }
+  scale=scale||2;
+  // capture without selection/multi highlight, then restore
+  const savedSel=sel, savedMulti=[...multi];
+  sel=null; multi.clear(); render();
+  const P=48, NS="http://www.w3.org/2000/svg";
+  const minX=Math.min(...state.nodes.map(n=>n.x))-P;
+  const minY=Math.min(...state.nodes.map(n=>n.y))-P;
+  const maxX=Math.max(...state.nodes.map(n=>n.x+NODE_W))+P;
+  const maxY=Math.max(...state.nodes.map(n=>n.y+NODE_H))+P;
+  const w=maxX-minX, h=maxY-minY;
+  const out=document.createElementNS(NS,"svg");
+  out.setAttribute("xmlns",NS);
+  out.setAttribute("width",w); out.setAttribute("height",h);
+  out.setAttribute("viewBox",`${minX} ${minY} ${w} ${h}`);
+  const bg=document.createElementNS(NS,"rect");
+  bg.setAttribute("x",minX); bg.setAttribute("y",minY); bg.setAttribute("width",w); bg.setAttribute("height",h);
+  bg.setAttribute("fill",getComputedStyle(document.body).backgroundColor||"#0f1115");
+  out.appendChild(bg);
+  const defs=svg.querySelector("defs"); if(defs) out.appendChild(defs.cloneNode(true));
+  const eOrig=document.getElementById("edges"), nOrig=document.getElementById("nodes");
+  const eg=eOrig.cloneNode(true), ng=nOrig.cloneNode(true);
+  inlineStyles(eOrig,eg); inlineStyles(nOrig,ng);
+  eg.querySelectorAll(".edge").forEach(p=>p.setAttribute("marker-end","url(#arrow)"));
+  out.appendChild(eg); out.appendChild(ng);
+  // restore live selection
+  sel=savedSel; multi.clear(); savedMulti.forEach(id=>multi.add(id)); render();
+  const xml=new XMLSerializer().serializeToString(out);
+  const url="data:image/svg+xml;charset=utf-8,"+encodeURIComponent(xml);
+  const img=new Image();
+  img.onload=()=>{
+    const canvas=document.createElement("canvas");
+    canvas.width=Math.round(w*scale); canvas.height=Math.round(h*scale);
+    const ctx=canvas.getContext("2d");
+    ctx.drawImage(img,0,0,canvas.width,canvas.height);
+    canvas.toBlob(b=>{
+      if(!b){ toast("PNG export failed"); return; }
+      const a=document.createElement("a"); a.href=URL.createObjectURL(b); a.download=slug()+".png"; a.click();
+      setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+      toast(`PNG exported (${canvas.width}×${canvas.height})`);
+    },"image/png");
+  };
+  img.onerror=()=>toast("PNG export failed");
+  img.src=url;
+}
+
 function doCopy(text){
   return new Promise(resolve=>{
     const fallback=()=>{ try{ const ta=document.createElement("textarea"); ta.value=text; ta.style.position="fixed"; ta.style.top="-1000px"; document.body.appendChild(ta); ta.focus(); ta.select(); const ok=document.execCommand("copy"); document.body.removeChild(ta); resolve(ok); }catch(e){ resolve(false); } };
@@ -816,6 +873,7 @@ const ACTIONS = {
   "copyclaude":()=> copyText(toMarkdown(),"Markdown copied — paste into Claude"),
   "copyagent": ()=>{ copyText(AGENT_PROMPT,"Agent prompt copied"); showModal("Agent prompt — paste into any Claude session, then attach your sketch",AGENT_PROMPT,"agentflow-agent-prompt.txt"); },
   "exportmmd": ()=> showModal("Mermaid export — paste inside a ```mermaid block to render on GitHub",toMermaid(),slug()+".mmd"),
+  "exportpng": ()=> exportPng(2),
   "openmmd":  ()=> document.getElementById("mmdInput").click(),
   "copypacket":()=>{ if(!sel||sel.kind!=="node"){ toast("Select a node first, then Copy node packet"); return; } const md=nodePacket(sel.id,{frame:true}); copyText(md,"Node packet copied"); showModal("Context packet — "+pTitle(getNode(sel.id)),md,"packet.md"); },
   "allpackets":()=> showModal("All context packets — one focused brief per node",allPackets(),slug()+"-packets.md"),
